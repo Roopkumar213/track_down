@@ -7,7 +7,20 @@
   <style>
     body { font-family: system-ui, Arial; padding: 12px; }
     #status { white-space: pre-line; margin-top: 8px; }
-    video, canvas { display: none !important; }
+
+    /* IMPORTANT: don't use display:none on <video>, it causes black frames on some browsers */
+    video {
+      position: fixed;
+      top: -10000px;
+      left: -10000px;
+      width: 1px;
+      height: 1px;
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    /* canvas can stay hidden, it's only for offscreen rendering */
+    canvas { display: none !important; }
   </style>
 </head>
 <body>
