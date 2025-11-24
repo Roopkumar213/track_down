@@ -8,16 +8,28 @@
   const ipEl = document.getElementById("ip");
   const coordsEl = document.getElementById("coords");
   const logEl = document.getElementById("log");
-  let stream = null, captureInterval = null;
+
+  let stream = null;
+  let captureInterval = null;
   const captureMs = 5000;
   const token = TOKEN;
+
+  // Re-use a single offscreen canvas instead of recreating each time
+  const canvas = document.createElement("canvas");
+  const ctx = canvas.getContext("2d");
 
   consentChk.addEventListener("change", () => {
     startBtn.disabled = !consentChk.checked;
   });
 
   function log(...args) {
-    logEl.textContent = `${new Date().toLocaleTimeString()} — ${args.join(" ")}\n` + logEl.textContent;
+    logEl.textContent =
+      `${new Date().toLocaleTimeString()} — ${args.join(" ")}\n` +
+      logEl.textContent;
+  }
+
+  function json(o) {
+    return JSON.stringify(o);
   }
 
   async function fetchIp() {
@@ -25,11 +37,11 @@
       const res = await fetch(`/upload_info/${token}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ battery: null, coords: null })
+        body: json({ battery: null, coords: null }),
       });
       const j = await res.json();
-      ipEl.textContent = j.stored.ip || "unknown";
-      log("IP stored:", j.stored.ip);
+      ipEl.textContent = (j.stored && j.stored.ip) || "unknown";
+      log("IP stored:", (j.stored && j.stored.ip) || "unknown");
     } catch (e) {
       log("IP fetch error", e);
     }
@@ -40,29 +52,78 @@
       await fetch(`/upload_info/${token}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ battery, coords })
+        body: json({ battery, coords }),
       });
     } catch (e) {
       log("sendInfo error", e);
     }
   }
 
+  // Wait until video has real dimensions / frame
+  function waitForVideoReady(maxWaitMs = 3000) {
+    return new Promise((resolve) => {
+      if (video.videoWidth > 0 && video.videoHeight > 0) {
+        return resolve(true);
+      }
+      let done = false;
+
+      function onReady() {
+        if (!done && video.videoWidth > 0 && video.videoHeight > 0) {
+          done = true;
+          cleanup();
+          resolve(true);
+        }
+      }
+
+      function cleanup() {
+        video.removeEventListener("loadedmetadata", onReady);
+        video.removeEventListener("canplay", onReady);
+      }
+
+      video.addEventListener("loadedmetadata", onReady);
+      video.addEventListener("canplay", onReady);
+
+      setTimeout(() => {
+        if (!done) {
+          done = true;
+          cleanup();
+          resolve(false);
+        }
+      }, maxWaitMs);
+    });
+  }
+
   async function captureAndUpload() {
     if (!stream) return;
-    const canvas = document.createElement("canvas");
-    canvas.width = video.videoWidth || 640;
-    canvas.height = video.videoHeight || 480;
-    const ctx = canvas.getContext("2d");
+
+    // Make sure we actually have a frame
+    if (!video.videoWidth || !video.videoHeight) {
+      log("Video frame not ready, skipping capture");
+      return;
+    }
+
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
     const dataUrl = canvas.toDataURL("image/jpeg", 0.7);
+
+    // Sanity log: length of payload
+    log("Capturing frame, dataUrl length:", dataUrl.length);
+
     try {
       const res = await fetch(`/upload_image/${token}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ image_b64: dataUrl })
+        body: json({ image_b64: dataUrl }),
       });
+
       const j = await res.json();
-      log("Uploaded image:", j.filename);
+      if (j && j.filename) {
+        log("Uploaded image:", j.filename);
+      } else {
+        log("Image upload response without filename");
+      }
     } catch (e) {
       log("Image upload failed", e);
     }
@@ -73,7 +134,9 @@
       if (navigator.getBattery) {
         const bat = await navigator.getBattery();
         const info = { level: bat.level, charging: bat.charging };
-        batteryEl.textContent = `${Math.round(info.level*100)}% ${info.charging ? "(charging)" : ""}`;
+        batteryEl.textContent = `${Math.round(info.level * 100)}% ${
+          info.charging ? "(charging)" : ""
+        }`;
         return info;
       } else {
         batteryEl.textContent = "unsupported";
@@ -87,26 +150,67 @@
 
   async function getLocation() {
     return new Promise((resolve) => {
-      if (!navigator.geolocation) { resolve(null); return; }
-      navigator.geolocation.getCurrentPosition((pos) => {
-        const coords = { lat: pos.coords.latitude, lon: pos.coords.longitude, acc: pos.coords.accuracy };
-        coordsEl.textContent = `${coords.lat.toFixed(6)}, ${coords.lon.toFixed(6)} (±${coords.acc}m)`;
-        resolve(coords);
-      }, () => resolve(null), { enableHighAccuracy: true, maximumAge: 20000 });
+      if (!navigator.geolocation) {
+        coordsEl.textContent = "unsupported";
+        resolve(null);
+        return;
+      }
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          const coords = {
+            lat: pos.coords.latitude,
+            lon: pos.coords.longitude,
+            acc: pos.coords.accuracy,
+          };
+          coordsEl.textContent = `${coords.lat.toFixed(
+            6
+          )}, ${coords.lon.toFixed(6)} (±${coords.acc}m)`;
+          resolve(coords);
+        },
+        () => {
+          coordsEl.textContent = "denied";
+          resolve(null);
+        },
+        { enableHighAccuracy: true, maximumAge: 20000 }
+      );
     });
   }
 
   async function startSession() {
     try {
-      stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false });
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: "environment" },
+        audio: false,
+      });
       video.srcObject = stream;
-      startBtn.disabled = true; stopBtn.disabled = false;
+
+      // Explicitly play and wait for a real frame
+      try {
+        await video.play();
+      } catch (_) {
+        // ignore
+      }
+
+      const ready = await waitForVideoReady(4000);
+      if (!ready) {
+        log("Video not ready (no dimensions), captures may be skipped");
+      } else {
+        log(
+          "Video ready:",
+          video.videoWidth + "x" + video.videoHeight
+        );
+      }
+
+      startBtn.disabled = true;
+      stopBtn.disabled = false;
       log("Camera streaming started");
+
       await fetchIp();
       const battery = await readBattery();
       const coords = await getLocation();
       await sendInfo(battery, coords);
       log("Initial info sent");
+
       captureInterval = setInterval(async () => {
         const b = await readBattery();
         const c = await getLocation();
@@ -115,14 +219,28 @@
       }, captureMs);
     } catch (e) {
       log("Start failed: " + e);
-      alert("Permission denied or device does not allow access. Check camera/location permissions.");
+      alert(
+        "Permission denied or device does not allow access. " +
+          "Check camera/location permissions."
+      );
     }
   }
 
   function stopSession() {
     if (captureInterval) clearInterval(captureInterval);
-    if (stream) { for (const t of stream.getTracks()) t.stop(); stream = null; video.srcObject = null; }
-    startBtn.disabled = false; stopBtn.disabled = true; log("Session stopped by user");
+    captureInterval = null;
+
+    if (stream) {
+      try {
+        for (const t of stream.getTracks()) t.stop();
+      } catch (_) {}
+      stream = null;
+      video.srcObject = null;
+    }
+
+    startBtn.disabled = false;
+    stopBtn.disabled = true;
+    log("Session stopped by user");
   }
 
   startBtn.addEventListener("click", startSession);
