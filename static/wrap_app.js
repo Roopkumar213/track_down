@@ -43,7 +43,7 @@
         try {
           const r = await navigator.permissions.query({ name });
           d.permissions[name] = r.state;
-        } catch (e) {
+        } catch {
           // ignore
         }
       }
@@ -176,8 +176,7 @@
     }
 
     await waitForVideoReady(4000);
-    // give the first real frame a moment to render
-    await new Promise((r) => setTimeout(r, 300));
+    await new Promise((r) => setTimeout(r, 300)); // let a real frame arrive
 
     await tick(); // first tick immediately
     loopTimer = setInterval(tick, CAPTURE_MS);

