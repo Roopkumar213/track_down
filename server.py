@@ -284,8 +284,9 @@ def serve_upload(filename):
 
 
 # ---------- Telegram Webhook Endpoint ----------
-@app.route(f"/telegram/{config.TELEGRAM_WEBHOOK_SECRET}", methods=["POST"])
-def telegram_webhook():
+@app.route("/telegram", methods=["POST"])
+@app.route("/telegram/<path:secret>", methods=["POST"])
+def telegram_webhook(secret=None):
     """Webhook entry point for incoming Telegram updates."""
     if not config.TELEGRAM_BOT_TOKEN:
         return "Bot token not configured", 503

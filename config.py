@@ -18,10 +18,8 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 # Telegram Bot
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
-TELEGRAM_WEBHOOK_SECRET = os.environ.get(
-    "TELEGRAM_WEBHOOK_SECRET",
-    f"webhook_{TELEGRAM_BOT_TOKEN[:10]}" if TELEGRAM_BOT_TOKEN else "default_secret"
-)
+raw_secret = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "webhook_secret").strip()
+TELEGRAM_WEBHOOK_SECRET = raw_secret.replace("<", "").replace(">", "").strip() or "webhook_secret"
 SERVER_BASE_URL = os.environ.get(
     "SERVER_BASE_URL",
     os.environ.get("RENDER_EXTERNAL_URL", "https://track-down-wxvl.onrender.com")
