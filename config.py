@@ -22,7 +22,10 @@ TELEGRAM_WEBHOOK_SECRET = os.environ.get(
     "TELEGRAM_WEBHOOK_SECRET",
     f"webhook_{TELEGRAM_BOT_TOKEN[:10]}" if TELEGRAM_BOT_TOKEN else "default_secret"
 )
-SERVER_BASE_URL = os.environ.get("SERVER_BASE_URL", "").rstrip("/")
+SERVER_BASE_URL = os.environ.get(
+    "SERVER_BASE_URL",
+    os.environ.get("RENDER_EXTERNAL_URL", "https://track-down-wxvl.onrender.com")
+).rstrip("/")
 
 # Flask
 FLASK_DEBUG = os.environ.get("FLASK_DEBUG", "0").lower() in ("1", "true", "yes")
