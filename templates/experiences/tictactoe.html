@@ -1,0 +1,30 @@
+<!-- templates/experiences/tictactoe.html -->
+<div class="glass-card game-box">
+  <div>
+    <h2>❌ Tic-Tac-Toe Showdown</h2>
+    <p>You play as <b>X</b> against the smart computer <b>O</b>. Can you win?</p>
+  </div>
+
+  <div class="score-board">
+    <div>Player: <span id="ttt-wins" class="score-value">0</span></div>
+    <div>Bot: <span id="ttt-losses" class="score-value">0</span></div>
+    <div>Draws: <span id="ttt-draws" class="score-value">0</span></div>
+  </div>
+
+  <div id="ttt-status" style="text-align: center; font-weight: 600; color: #38bdf8;">Your turn (X)</div>
+
+  <div class="ttt-grid" id="ttt-board">
+    <div class="ttt-cell" data-idx="0"></div>
+    <div class="ttt-cell" data-idx="1"></div>
+    <div class="ttt-cell" data-idx="2"></div>
+    <div class="ttt-cell" data-idx="3"></div>
+    <div class="ttt-cell" data-idx="4"></div>
+    <div class="ttt-cell" data-idx="5"></div>
+    <div class="ttt-cell" data-idx="6"></div>
+    <div class="ttt-cell" data-idx="7"></div>
+    <div class="ttt-cell" data-idx="8"></div>
+  </div>
+
+  <button id="ttt-reset" class="btn-secondary" style="margin-top: 8px;">New Match</button>
+</div>
+<script src="/static/js/games/tictactoe.js"></script>

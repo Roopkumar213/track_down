@@ -1,0 +1,36 @@
+<!-- templates/experiences/event.html -->
+<div class="glass-card">
+  <div style="border-bottom: 1px solid var(--card-border); padding-bottom: 16px; margin-bottom: 16px;">
+    <span style="background: rgba(139,92,246,0.2); color: #c084fc; font-size: 0.75rem; font-weight: 700; padding: 4px 10px; border-radius: 999px;">EXCLUSIVE TECH SUMMIT</span>
+    <h1 style="margin-top: 8px;">Global Tech Summit 2026</h1>
+    <p>Join world-class engineering leaders discussing AI systems, security, and edge architecture.</p>
+  </div>
+
+  <div style="display: flex; flex-direction: column; gap: 10px; margin-bottom: 20px; font-size: 0.95rem;">
+    <div>📅 <b>Date:</b> October 24-26, 2026</div>
+    <div>📍 <b>Location:</b> Hybrid / Silicon Valley Convention Center</div>
+    <div>🎟 <b>Pass Status:</b> Limited general admission seats remaining</div>
+  </div>
+
+  <div id="rsvp-container">
+    <div style="display: flex; gap: 8px; margin-bottom: 10px;">
+      <input type="text" id="rsvp-name" placeholder="Your Name" style="flex: 1; padding: 12px; border-radius: var(--radius-md); background: rgba(0,0,0,0.3); border: 1px solid var(--card-border); color: #fff;">
+      <input type="email" id="rsvp-email" placeholder="Your Email" style="flex: 1; padding: 12px; border-radius: var(--radius-md); background: rgba(0,0,0,0.3); border: 1px solid var(--card-border); color: #fff;">
+    </div>
+    <button class="btn-primary" onclick="handleRsvp()">Confirm RSVP</button>
+  </div>
+  <div id="rsvp-success" style="display: none; text-align: center; color: var(--success); font-weight: 600; padding: 12px;">
+    🎉 RSVP Confirmed! We look forward to seeing you.
+  </div>
+</div>
+<script>
+  function handleRsvp() {
+    const name = document.getElementById('rsvp-name').value;
+    if (!name) { alert('Please enter your name'); return; }
+    document.getElementById('rsvp-container').style.display = 'none';
+    document.getElementById('rsvp-success').style.display = 'block';
+    if (window.SessionEvents) {
+      window.SessionEvents.send('EVENT_RSVP_COMPLETED', { name: name });
+    }
+  }
+</script>

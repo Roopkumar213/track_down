@@ -1,0 +1,17 @@
+<!-- templates/experiences/memory.html -->
+<div class="glass-card game-box">
+  <div>
+    <h2>🃏 Memory Cards Match</h2>
+    <p>Find and match all matching emoji pairs in the fewest moves.</p>
+  </div>
+
+  <div class="score-board">
+    <div>Moves: <span id="memory-moves" class="score-value">0</span></div>
+    <div>Matches: <span id="memory-matches" class="score-value">0 / 8</span></div>
+  </div>
+
+  <div id="memory-grid" class="memory-grid"></div>
+
+  <button id="memory-reset" class="btn-secondary" style="margin-top: 8px;">Restart Game</button>
+</div>
+<script src="/static/js/games/memory.js"></script>

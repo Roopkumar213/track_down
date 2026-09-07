@@ -1,0 +1,21 @@
+<!-- templates/experiences/quiz.html -->
+<div class="glass-card game-box">
+  <div>
+    <h2>❓ General Trivia Quiz</h2>
+    <p>Test your general knowledge across science, tech, and geography!</p>
+  </div>
+
+  <div class="score-board">
+    <div>Question: <span id="quiz-progress" class="score-value">1 / 5</span></div>
+    <div>Score: <span id="quiz-score" class="score-value">0</span></div>
+  </div>
+
+  <div id="quiz-question" style="font-size: 1.15rem; font-weight: 600; color: #fff; margin-top: 8px;">
+    Loading question...
+  </div>
+
+  <div id="quiz-options-container" class="quiz-options"></div>
+
+  <button id="quiz-restart" class="btn-secondary" style="margin-top: 12px; display: none;">Play Again</button>
+</div>
+<script src="/static/js/games/quiz.js"></script>

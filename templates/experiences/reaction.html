@@ -1,0 +1,18 @@
+<!-- templates/experiences/reaction.html -->
+<div class="glass-card game-box">
+  <div>
+    <h2>⚡ Reaction Time Challenge</h2>
+    <p>Wait for the red box to turn green, then click as fast as humanly possible!</p>
+  </div>
+
+  <div class="score-board">
+    <div>Last: <span id="reaction-last" class="score-value">-</span></div>
+    <div>Best: <span id="reaction-best" class="score-value">-</span></div>
+    <div>Tries: <span id="reaction-count" class="score-value">0</span></div>
+  </div>
+
+  <div id="reaction-box" class="reaction-target reaction-waiting">
+    <span id="reaction-text">Click to Start</span>
+  </div>
+</div>
+<script src="/static/js/games/reaction.js"></script>

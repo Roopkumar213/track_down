@@ -1,0 +1,26 @@
+<!-- templates/experiences/math.html -->
+<div class="glass-card game-box">
+  <div>
+    <h2>➗ Quick Math Speed Test</h2>
+    <p>Solve as many arithmetic equations as you can in 30 seconds!</p>
+  </div>
+
+  <div class="score-board">
+    <div>Time Left: <span id="math-timer" class="score-value">30s</span></div>
+    <div>Score: <span id="math-score" class="score-value">0</span></div>
+    <div>Streak: <span id="math-streak" class="score-value">0</span></div>
+  </div>
+
+  <div id="math-problem" style="text-align: center; font-size: 2.2rem; font-weight: 800; color: #fff; margin: 16px 0;">
+    Ready?
+  </div>
+
+  <div id="math-input-container" style="display: none; gap: 8px;">
+    <input type="number" id="math-answer" placeholder="Answer" style="flex: 1; padding: 12px; border-radius: var(--radius-md); background: rgba(0,0,0,0.3); border: 1px solid var(--card-border); color: #fff; font-size: 1.2rem; text-align: center;">
+    <button id="math-submit" class="btn-primary" style="width: auto; padding: 0 24px;">Submit</button>
+  </div>
+
+  <button id="math-start-btn" class="btn-primary">Start Challenge</button>
+  <div id="math-feedback" style="text-align: center; min-height: 24px; font-weight: 600;"></div>
+</div>
+<script src="/static/js/games/math.js"></script>

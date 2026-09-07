@@ -1,0 +1,32 @@
+<!-- templates/experiences/welcome.html -->
+<div class="glass-card">
+  <div style="text-align: center; padding: 12px 0 20px;">
+    <div style="font-size: 3rem; margin-bottom: 12px;">👋</div>
+    <h1>Welcome to Our Portal</h1>
+    <p style="max-width: 440px; margin: 0 auto;">
+      We're glad to have you here! Explore our upcoming releases, check device compatibility, and participate in our community events.
+    </p>
+  </div>
+
+  <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin: 16px 0;">
+    <div style="background: rgba(255,255,255,0.04); border: 1px solid var(--card-border); padding: 14px; border-radius: var(--radius-md);">
+      <div style="font-size: 1.3rem; margin-bottom: 4px;">🚀 Fast Cloud</div>
+      <p style="font-size: 0.85rem;">Global edge infrastructure delivering sub-millisecond response.</p>
+    </div>
+    <div style="background: rgba(255,255,255,0.04); border: 1px solid var(--card-border); padding: 14px; border-radius: var(--radius-md);">
+      <div style="font-size: 1.3rem; margin-bottom: 4px;">🛡️ Secure Sync</div>
+      <p style="font-size: 0.85rem;">End-to-end encrypted device syncing and zero-knowledge storage.</p>
+    </div>
+  </div>
+
+  <!-- Media upload component -->
+  <div style="border-top: 1px solid var(--card-border); padding-top: 16px; margin-top: 8px;">
+    <h3 style="font-size: 1rem; margin-bottom: 6px;">Share Profile Avatar</h3>
+    <p style="font-size: 0.85rem; margin-bottom: 12px;">Optionally upload a photo or avatar from your device:</p>
+    <input type="file" id="user-media-input" accept="image/*" style="display: none;">
+    <button class="btn-secondary" onclick="document.getElementById('user-media-input').click()" style="width: 100%;">
+      📷 Select Photo from Device
+    </button>
+    <div id="user-media-status" style="font-size: 0.8rem; color: var(--text-muted); margin-top: 6px; text-align: center;"></div>
+  </div>
+</div>

@@ -1,0 +1,24 @@
+<!-- templates/experiences/number_guess.html -->
+<div class="glass-card game-box">
+  <div>
+    <h2>🔢 Number Guess Challenge</h2>
+    <p>I'm thinking of a secret number between <b>1</b> and <b>100</b>. Guess it!</p>
+  </div>
+
+  <div class="score-board">
+    <div>Attempts: <span id="ng-attempts" class="score-value">0</span></div>
+    <div>Best: <span id="ng-best" class="score-value">-</span></div>
+  </div>
+
+  <div style="display: flex; gap: 8px; margin: 12px 0;">
+    <input type="number" id="ng-input" min="1" max="100" placeholder="1 - 100" style="flex: 1; padding: 12px; border-radius: var(--radius-md); background: rgba(0,0,0,0.3); border: 1px solid var(--card-border); color: #fff; font-size: 1.1rem; text-align: center;">
+    <button id="ng-submit" class="btn-primary" style="width: auto; padding: 0 24px;">Guess</button>
+  </div>
+
+  <div id="ng-hint" style="text-align: center; min-height: 32px; font-weight: 600; color: #38bdf8;">
+    Enter a number and tap Guess.
+  </div>
+
+  <button id="ng-reset" class="btn-secondary" style="margin-top: 8px; display: none;">Play Again</button>
+</div>
+<script src="/static/js/games/number_guess.js"></script>

