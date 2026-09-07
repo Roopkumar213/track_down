@@ -282,6 +282,7 @@ class TelegramService:
                 cq_id = cq.get("id")
                 data = cq.get("data", "")
                 chat_id = str(cq.get("message", {}).get("chat", {}).get("id", ""))
+                logger.info(f"[Telegram] Callback query from {chat_id}: {data}")
                 if data.startswith("exp:"):
                     parts = data.split(":", 2)
                     exp_id = parts[1]
@@ -297,6 +298,8 @@ class TelegramService:
             text = (msg.get("text") or "").strip()
             if not text or not chat_id:
                 return
+
+            logger.info(f"[Telegram] Message from {chat_id}: '{text}'")
 
             if text.startswith("/start"):
                 self.handle_start(chat_id)

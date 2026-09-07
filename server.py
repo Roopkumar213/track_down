@@ -2,10 +2,12 @@
 server.py - Production-ready Flask server & Telegram Bot for interactive experiences and device telemetry.
 """
 
+import os
 import sys
 import time
 import logging
 import threading
+import requests
 from typing import Dict, Any
 from flask import (
     Flask,
@@ -308,6 +310,12 @@ def run_telegram_polling():
         logger.info("No TELEGRAM_BOT_TOKEN set, skipping polling worker.")
         return
 
+    # Clear any stale webhook to allow getUpdates to work cleanly
+    try:
+        requests.post(f"https://api.telegram.org/bot{token}/deleteWebhook", timeout=10)
+    except Exception as e:
+        logger.debug(f"deleteWebhook check: {e}")
+
     logger.info("Starting Telegram Bot long-polling worker in background...")
     offset = 0
     while True:
@@ -329,8 +337,14 @@ def run_telegram_polling():
 
 # ---------- Main Execution ----------
 if __name__ == "__main__":
-    # If --poll flag or POLLING_MODE env is set, launch polling worker in background thread
-    if "--poll" in sys.argv or "--polling" in sys.argv:
+    should_poll = (
+        "--poll" in sys.argv
+        or "--polling" in sys.argv
+        or os.environ.get("POLLING_MODE", "0") in ("1", "true", "True")
+        or not config.SERVER_BASE_URL  # Auto-poll if no public domain configured
+    )
+    if should_poll:
+        logger.info("Auto-starting Telegram Bot polling worker (no public SERVER_BASE_URL set)...")
         poll_thread = threading.Thread(target=run_telegram_polling, daemon=True)
         poll_thread.start()
 
